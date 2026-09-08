@@ -32,7 +32,7 @@ def test_eval_set_resolves_strings(tmp_path: Path) -> None:
 
 def test_cli_inspect(tmp_path: Path, capsys: object) -> None:
     eval("cubepick-reach", "scripted", "cubepick", log_dir=str(tmp_path))
-    (log_path,) = tmp_path.glob("*.json")
+    (log_path,) = tmp_path.rglob("*.json")
     import contextlib
     import io
 

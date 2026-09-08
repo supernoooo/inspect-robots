@@ -88,7 +88,7 @@ def test_inf_metric_written_as_null(tmp_path: Path) -> None:
     (log,) = eval(task, ScriptedPolicy(), _NoDistanceEmbodiment(), log_dir=str(tmp_path))
     assert log.results.metrics["min_distance_to_goal"] == float("inf")  # in-memory sentinel
 
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     text = path.read_text(encoding="utf-8")
     assert "Infinity" not in text and "NaN" not in text
     data = _read_strict(path)  # a strict parser accepts the whole file
@@ -107,7 +107,7 @@ def test_nan_action_halts_as_safety_abort_and_log_reaches_disk(tmp_path: Path) -
     assert log.error is not None and "non-finite" in log.error
     assert "_NaNApprover" in log.error
 
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     restored = read_eval_log(str(path))
     assert restored.status == "error"
     _read_strict(path)  # strict parseable even for a halted run
@@ -126,7 +126,7 @@ def test_long_task_name_still_writes_its_log(tmp_path: Path) -> None:
     )
     (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
 
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     assert len(path.name.encode()) <= 255
     # The full name is preserved in the log body; only the filename is capped.
     assert log.eval.task == name
@@ -148,7 +148,7 @@ def test_scene_instruction_and_judgements_serialize_strict(tmp_path: Path) -> No
     # verbatim, and one judgement slot per epoch (None when nobody judged).
     (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.status == "success"
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     data = _read_strict(path)
     samples = data["samples"]
     assert isinstance(samples, list)
@@ -173,7 +173,7 @@ def test_populated_operator_judgement_and_note_serialize_strict(tmp_path: Path) 
         before_scoring=judge,
     )
     assert log.status == "success"
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     data = _read_strict(path)
     samples = data["samples"]
     assert isinstance(samples, list)
@@ -190,7 +190,7 @@ def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> No
             return {"inf": float("inf"), "nan": float("nan")}
 
     eval(_task(), _NonFiniteTranscriptPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     data = _read_strict(path)
     samples = data["samples"]
     assert isinstance(samples, list)

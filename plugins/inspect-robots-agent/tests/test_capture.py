@@ -154,6 +154,17 @@ def test_blob_deduplication_spans_records_and_trials(tmp_path: Path) -> None:
     assert len(_rows(tmp_path / "wire/run-1/second-e0/calls.jsonl")) == 1
 
 
+def test_allocated_run_directory_is_not_nested_twice(tmp_path: Path) -> None:
+    run_dir = tmp_path / "20260908_run0001"
+    capture = WireCapture()
+    capture.begin_trial(str(run_dir), run_dir.name, "scene-e0")
+    _record(capture)
+
+    assert capture.end_trial() == "wire/scene-e0/calls.jsonl"
+    assert (run_dir / "wire/scene-e0/calls.jsonl").is_file()
+    assert not (run_dir / "wire" / run_dir.name).exists()
+
+
 def test_row_schema_and_response_normalization(tmp_path: Path) -> None:
     capture = WireCapture()
     capture.begin_trial(str(tmp_path), "run-1", "scene-e0")

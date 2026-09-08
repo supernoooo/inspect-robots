@@ -64,6 +64,12 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _run_dir(root: Path) -> Path:
+    """Return the single grouped run directory created by one test eval."""
+    (run_dir,) = [path for path in root.iterdir() if path.is_dir()]
+    return run_dir
+
+
 def test_eval_writes_complete_action_log_and_pointer(tmp_path: Path) -> None:
     sink = _RecordingSink()
 
@@ -78,13 +84,14 @@ def test_eval_writes_complete_action_log_and_pointer(tmp_path: Path) -> None:
     (record,) = sink.records
     pointer = record.metadata["actions"]
     assert isinstance(pointer, str)
-    path = tmp_path / pointer
+    path = _run_dir(tmp_path) / pointer
     assert path.exists()
     assert log.samples[0].trial_metadata == ({"actions": pointer},)
 
     lines = _read_jsonl(path)
     header, steps = lines[0], lines[1:]
-    run_stamp = Path(pointer).parts[1]
+    run_stamp = log.eval.run_id
+    assert run_stamp == _run_dir(tmp_path).name
     assert header == {
         "kind": "header",
         "run_id": run_stamp,
@@ -120,7 +127,7 @@ def test_action_log_records_executed_clamped_action(tmp_path: Path) -> None:
     )
 
     (record,) = sink.records
-    (step_line,) = _read_jsonl(tmp_path / record.metadata["actions"])[1:]
+    (step_line,) = _read_jsonl(_run_dir(tmp_path) / record.metadata["actions"])[1:]
     np.testing.assert_array_equal(step_line["action"], [0.1, -0.1])
     assert step_line["action"] != [0.5, -0.5]
 
@@ -147,7 +154,7 @@ def test_errored_trial_writes_partial_action_log(tmp_path: Path) -> None:
     (record,) = sink.records
     assert log.status == record.status == "error"
     assert len(record.steps) == 1
-    lines = _read_jsonl(tmp_path / record.metadata["actions"])
+    lines = _read_jsonl(_run_dir(tmp_path) / record.metadata["actions"])
     assert len(lines) == 2
     np.testing.assert_array_equal(lines[1]["action"], record.steps[0].action.data)
 
@@ -176,8 +183,8 @@ def test_cancelled_trial_writes_action_log_before_reraise(tmp_path: Path) -> Non
     assert record.status == "cancelled"
     assert len(record.steps) == 1
     pointer = record.metadata["actions"]
-    assert (tmp_path / pointer).exists()
-    assert len(_read_jsonl(tmp_path / pointer)) == 2
+    assert (_run_dir(tmp_path) / pointer).exists()
+    assert len(_read_jsonl(_run_dir(tmp_path) / pointer)) == 2
 
 
 def test_store_actions_false_creates_no_directory_or_pointer(tmp_path: Path) -> None:
@@ -191,7 +198,7 @@ def test_store_actions_false_creates_no_directory_or_pointer(tmp_path: Path) -> 
         store_actions=False,
     )
 
-    assert not (tmp_path / "actions").exists()
+    assert not (_run_dir(tmp_path) / "actions").exists()
     assert "actions" not in sink.records[0].metadata
 
 
@@ -210,7 +217,7 @@ def test_zero_step_trial_writes_header_only_action_log(tmp_path: Path) -> None:
 
     (record,) = sink.records
     assert record.steps == []
-    assert len(_read_jsonl(tmp_path / record.metadata["actions"])) == 1
+    assert len(_read_jsonl(_run_dir(tmp_path) / record.metadata["actions"])) == 1
 
 
 def test_start_failed_trial_writes_header_only_action_log(tmp_path: Path) -> None:
@@ -231,7 +238,7 @@ def test_start_failed_trial_writes_header_only_action_log(tmp_path: Path) -> Non
     assert log.status == record.status == "error"
     assert record.steps == []
     pointer = record.metadata["actions"]
-    assert len(_read_jsonl(tmp_path / pointer)) == 1
+    assert len(_read_jsonl(_run_dir(tmp_path) / pointer)) == 1
 
 
 def test_epochs_write_distinct_action_files_in_one_run_directory(tmp_path: Path) -> None:
@@ -247,7 +254,7 @@ def test_epochs_write_distinct_action_files_in_one_run_directory(tmp_path: Path)
     pointers = [record.metadata["actions"] for record in sink.records]
     assert Path(pointers[0]).parent == Path(pointers[1]).parent
     assert [Path(pointer).name for pointer in pointers] == ["s0-e0.jsonl", "s0-e1.jsonl"]
-    assert all((tmp_path / pointer).exists() for pointer in pointers)
+    assert all((_run_dir(tmp_path) / pointer).exists() for pointer in pointers)
 
 
 def test_scene_id_sanitization_matches_frames_safe(tmp_path: Path) -> None:
@@ -263,8 +270,8 @@ def test_scene_id_sanitization_matches_frames_safe(tmp_path: Path) -> None:
 
     pointer = sink.records[0].metadata["actions"]
     assert Path(pointer).name == f"{_safe(scene_id)}-e0.jsonl"
-    assert (tmp_path / pointer).resolve().is_relative_to(tmp_path.resolve())
-    assert _read_jsonl(tmp_path / pointer)[0]["scene_id"] == scene_id
+    assert (_run_dir(tmp_path) / pointer).resolve().is_relative_to(tmp_path.resolve())
+    assert _read_jsonl(_run_dir(tmp_path) / pointer)[0]["scene_id"] == scene_id
 
 
 @pytest.mark.parametrize(
@@ -301,7 +308,7 @@ def test_action_log_labels_follow_action_semantics(
         sinks=[sink],
     )
 
-    header = _read_jsonl(tmp_path / sink.records[0].metadata["actions"])[0]
+    header = _read_jsonl(_run_dir(tmp_path) / sink.records[0].metadata["actions"])[0]
     assert header["labels"] == expected
 
 
@@ -339,7 +346,7 @@ def test_non_finite_policy_action_errors_with_header_only_log(tmp_path: Path) ->
     (record,) = sink.records
     assert record.steps == []
     pointer = record.metadata["actions"]
-    assert len(_read_jsonl(tmp_path / pointer)) == 1
+    assert len(_read_jsonl(_run_dir(tmp_path) / pointer)) == 1
     step.assert_not_called()
 
 
@@ -365,8 +372,17 @@ def test_write_action_log_rejects_nan_before_touching_disk(tmp_path: Path) -> No
     assert not (tmp_path / "actions").exists()
 
 
-def test_action_log_io_error_degrades_without_affecting_eval(tmp_path: Path) -> None:
-    (tmp_path / "actions").write_text("blocks the directory", encoding="utf-8")
+def test_action_log_io_error_degrades_without_affecting_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = Path.mkdir
+
+    def reject_actions(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == "actions":
+            raise OSError("blocked action directory")
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", reject_actions)
 
     with pytest.warns(RuntimeWarning, match="Action log disabled for this trial"):
         (log,) = eval(
@@ -378,7 +394,7 @@ def test_action_log_io_error_degrades_without_affecting_eval(tmp_path: Path) -> 
 
     assert log.status == "success"
     assert log.samples[0].trial_metadata == ({},)
-    assert list(tmp_path.glob("*.json"))
+    assert list(tmp_path.rglob("*.json"))
 
 
 def test_eval_set_forwards_store_actions_behaviorally(tmp_path: Path) -> None:
@@ -392,4 +408,4 @@ def test_eval_set_forwards_store_actions_behaviorally(tmp_path: Path) -> None:
 
     assert success
     assert logs[0].samples[0].trial_metadata == ({},)
-    assert not (tmp_path / "actions").exists()
+    assert not (_run_dir(tmp_path) / "actions").exists()

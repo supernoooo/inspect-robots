@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import os
@@ -197,7 +198,7 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "run status: completed" in out
     assert "success_at_end" in out
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
     assert "error:" not in out
     # A clean run teaches both terminal and browser read-back commands.
@@ -549,7 +550,7 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     assert "  [error] scene-1\n" in out
     assert "scene-0" not in out  # successful scenes are not failure context
     assert out.count("EmbodimentFault: reset exploded") == 1
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
@@ -630,7 +631,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
     assert "error: all 1 trial(s) errored; nothing was scored" in out
     assert "[error] scene-0: PolicyError: invalid API key" in out
     assert "trials: 1 (1 errored)" in out
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     assert f"hint: inspect it with: inspect-robots inspect {written}" in out
     # And `inspect` on the written log shows the same headline facts.
     assert main(["inspect", str(written)]) == 1
@@ -683,7 +684,7 @@ def test_cli_partial_errors_stay_success_but_are_visible(
     assert "run status: completed" in out
     assert "trials: 2 (1 errored)" in out
     assert "[error] scene-1: PolicyError: policy reset exploded" in out
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
@@ -713,7 +714,7 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert rc == 0
     out = capsys.readouterr().out
     assert "trials: 2" in out  # --epochs overrode the task's epoch count
-    assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
+    assert list(tmp_path.rglob("frames/*.npy"))  # --store-frames streamed in the run directory
 
 
 @pytest.mark.parametrize("epochs_value", ["0", "-1", "-5"])
@@ -959,7 +960,7 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert out.count("log dir:") == 1  # one shared line, not one per task
     assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
     assert "HTML viewer: inspect-robots view" not in out
-    assert len(list(tmp_path.glob("*.json"))) == 2
+    assert len(list(tmp_path.rglob("*.json"))) == 2
 
 
 def test_cli_eval_set_reports_failed_task_and_keeps_good_log(
@@ -1006,7 +1007,7 @@ def test_cli_eval_set_reports_failed_task_and_keeps_good_log(
     assert "[completed] kb/good" in out
     assert "[error] kb/bad" in out
     assert "ConfigError: unknown epoch reducer 'bogus'" in out
-    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(list(tmp_path.rglob("*.json"))) == 1
 
 
 def test_cli_eval_set_glob_matches_by_prefix(
@@ -1063,7 +1064,7 @@ def test_cli_eval_set_dedups_overlapping_patterns(
     assert rc == 0
     out = capsys.readouterr().out
     assert "tasks: kb/a, kb/b" in out  # kb/a not repeated despite matching twice
-    assert len(list(tmp_path.glob("*.json"))) == 2
+    assert len(list(tmp_path.rglob("*.json"))) == 2
 
 
 def test_cli_eval_set_unmatched_pattern_errors() -> None:
@@ -1110,7 +1111,7 @@ def test_cli_eval_set_epochs_override_applies_to_every_task(
     assert rc == 0
     from inspect_robots import read_eval_log
 
-    logs = [read_eval_log(str(p)) for p in tmp_path.glob("*.json")]
+    logs = [read_eval_log(str(p)) for p in tmp_path.rglob("*.json")]
     assert len(logs) == 2
     assert all(log.results.total_trials == 2 for log in logs)  # --epochs overrode both tasks
 
@@ -1558,7 +1559,7 @@ def test_cli_setup_dispatches_to_wizard(monkeypatch: pytest.MonkeyPatch) -> None
 def _read_only_log(log_dir: Path) -> EvalLog:
     from inspect_robots import read_eval_log
 
-    (path,) = log_dir.glob("*.json")
+    (path,) = log_dir.rglob("*.json")
     return read_eval_log(str(path))
 
 
@@ -2148,6 +2149,76 @@ def test_view_stdout_embeds_resolved_frames(
     assert "wrote " not in out
 
 
+def test_view_renders_camera_media_without_a_policy_transcript(tmp_path: Path) -> None:
+    """Ordinary VLA policies still get a camera flipbook in headless reports."""
+    import numpy as np
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for step in range(20):
+        np.save(
+            frames / f"s0-e0_top_cam_{step:06d}.npy",
+            np.full((3, 4, 3), step, dtype=np.uint8),
+        )
+    log = _step_limit_log()
+    log = dataclasses.replace(
+        log,
+        stats=dataclasses.replace(log.stats, frames_dir=str(frames)),
+    )
+
+    from inspect_robots._html import render_html
+
+    document = render_html(log, title="plain policy", frames_dir=frames, no_video=True)
+
+    assert "Trial 0 cameras" in document
+    assert 'class="flipbook-player"' in document
+    assert 'data-camera="top_cam"' in document
+    assert 'data-step="0"' in document
+    assert 'data-step="19"' in document
+    assert document.count('class="frame"') == 12
+
+
+def test_live_view_uses_recent_frames_without_a_policy_transcript(tmp_path: Path) -> None:
+    """A headless browser view follows raw cameras even when policy audit is empty."""
+    import numpy as np
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for step in range(20):
+        np.save(
+            frames / f"s0-e0_top_cam_{step:06d}.npy",
+            np.full((3, 4, 3), step, dtype=np.uint8),
+        )
+    base = _step_limit_log()
+    scene = dataclasses.replace(
+        base.samples[0],
+        policy_transcripts=([],),
+        trial_metadata=({"live": {"step": 19}},),
+    )
+    log = dataclasses.replace(
+        base,
+        status="started",
+        stats=dataclasses.replace(base.stats, frames_dir=str(frames)),
+        samples=(scene,),
+    )
+
+    from inspect_robots._html import render_html
+
+    document = render_html(
+        log,
+        title="live plain policy",
+        frames_dir=frames,
+        live_frames_budget_bytes=1_000_000,
+        no_video=True,
+        serve_pass=True,
+    )
+
+    assert "Trial 0 cameras" in document
+    assert 'data-step="19"' in document
+    assert 'data-step="0"' not in document
+    assert document.count('class="frame"') == 12
+
+
 @pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
 def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path: Path) -> None:
     path = _write_log(_step_limit_log(), tmp_path, "run.json")
@@ -2575,7 +2646,7 @@ def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
 
-    with pytest.raises(SystemExit, match=r"no top-level \*\.json") as excinfo:
+    with pytest.raises(SystemExit, match=r"no \*\.json logs found") as excinfo:
         main(["view", str(logs)])
 
     assert excinfo.value.code
@@ -6428,7 +6499,7 @@ def test_config_store_frames_enables_frame_capture(
     log_dir = tmp_path / "logs"
     rc = main(["reach the cube", "--log-dir", str(log_dir)])
     assert rc == 0
-    assert list((log_dir / "frames").rglob("*.npy"))
+    assert list(log_dir.rglob("frames/*.npy"))
     assert _read_only_log(log_dir).stats.frames_dir is not None
 
 
@@ -6444,8 +6515,61 @@ def test_no_store_frames_flag_overrides_config_default(
     log_dir = tmp_path / "logs"
     rc = main(["reach the cube", "--no-store-frames", "--log-dir", str(log_dir)])
     assert rc == 0
-    assert not (log_dir / "frames").exists()
+    assert not list(log_dir.rglob("frames"))
     assert _read_only_log(log_dir).stats.frames_dir is None
+
+
+def test_save_video_implies_frame_capture_and_uses_run_video_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[argparse.Namespace] = []
+
+    def fake_video(args: argparse.Namespace) -> int:
+        calls.append(args)
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_video", fake_video)
+    log_dir = tmp_path / "logs"
+
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--no-prompt",
+            "--save-video",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+
+    assert rc == 0
+    assert list(log_dir.rglob("frames/*.npy"))
+    assert len(calls) == 1
+    log_path = Path(calls[0].log)
+    assert calls[0].out == str(log_path.parent / "videos")
+    assert calls[0].fps is None
+    assert calls[0].ffmpeg is None
+    capsys.readouterr()
+
+
+def test_save_video_rejects_no_store_frames() -> None:
+    with pytest.raises(SystemExit, match="conflicts with --no-store-frames"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--save-video",
+                "--no-store-frames",
+            ]
+        )
 
 
 class _FakeRerunSink:

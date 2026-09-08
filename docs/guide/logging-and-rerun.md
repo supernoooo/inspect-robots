@@ -12,11 +12,34 @@ a structured `error`.
 from inspect_robots import eval, read_eval_log
 
 (log,) = eval("cubepick-reach", "scripted", "cubepick", log_dir="logs")
-again = read_eval_log("logs/cubepick-reach_xxxx.json")   # always re-readable
+again = read_eval_log("logs/20260908_run0001/cubepick-reach_xxxx.json")
 ```
 
 Logs are written atomically (temp file + rename), schema-versioned, and carry
 a read-back guarantee: a newer Inspect Robots always reads an older log.
+Each evaluation atomically claims a local-date directory named
+`YYYYMMDD_runNNNN`. Its JSON, transient live JSON, actions, frames, generated
+HTML, wire capture, and directory-configured Rerun recording stay together:
+
+```text
+logs/20260908_run0001/
+├── <task>_<id>.json
+├── actions/
+├── frames/
+├── html/
+├── videos/               # when run with --save-video
+├── wire/                 # policies with wire capture
+└── <task>_<id>.rrd       # when Rerun saving is enabled
+```
+
+The JSON's `eval.run_id` repeats the directory name. For an HTTP-backed
+policy, `eval.policy_server` records the server URL and its health metadata;
+servers that expose `checkpoint` and `revision` therefore make the exact
+loaded weights auditable.
+
+`inspect-robots view logs/` keeps the cross-run index at `logs/html/index.html`
+and writes each report under its own `<run-dir>/html/`. Rendering one grouped
+JSON directly uses the same per-run HTML directory by default.
 
 Pressing Ctrl-C during a rollout writes a log with `status: "cancelled"` and
 everything gathered so far, including the partial trial record and transcript.
@@ -110,7 +133,7 @@ For `inspect-robots run`, a live viewer or `--rerun-connect` saves a `.rrd` in
 the log directory by default. Replay it later with:
 
 ```bash
-rerun logs/task_slug_xxxxxxxx.rrd
+rerun logs/YYYYMMDD_runNNNN/task_slug_xxxxxxxx.rrd
 ```
 
 Use `--no-rerun-save` for a live-only run, or set `rerun_save = false` under
@@ -150,7 +173,7 @@ Every delivered trial writes its executed action sequence to an atomic JSONL
 side-car by default:
 
 ```
-actions/<run_id>/<sanitized_scene_id>-e<epoch>.jsonl
+logs/<run_id>/actions/<sanitized_scene_id>-e<epoch>.jsonl
 ```
 
 The first row identifies the run, raw scene id, epoch, action dimension, and
@@ -170,7 +193,7 @@ trial.
 ## Frame side-cars
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
-a per-run subdirectory of `<log_dir>/frames` through a
+a `frames/` subdirectory inside the allocated run directory through a
 [`FrameStore`](/api/#inspect_robots.frames.FrameStore) and the `TrialRecord` keeps lightweight
 [`FrameRef`](/api/#inspect_robots.frames.FrameRef) handles, so long, multi-camera episodes stay
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
@@ -184,7 +207,8 @@ files, including the terminal post-action state. In each
 [`StepRecord`](/api/#inspect_robots.rollout.StepRecord),
 `image_refs` points to the pre-action frames and `result_image_refs` points to
 the post-action frames. Both corresponding `Observation.images` mappings are
-empty while a frame store is active. Consumers must load the appropriate
+empty while a frame store is active. This stripping happens only on the stored
+record copy; the policy and live sinks receive the full camera arrays. Consumers must load the appropriate
 `FrameRef` instead of reading inline arrays. Without a frame store, observations
 remain inline and both ref mappings are `None`.
 
@@ -192,6 +216,12 @@ Frame storage starts immediately after reset, before the first policy action.
 If the policy fails during its first decision, reset frames can remain on disk
 even though no `StepRecord` exists. This is intentional: the initial sensor
 state is still available for failure forensics.
+
+`inspect-robots run ... --save-video` turns frame storage on automatically and
+encodes the captured streams into `<run-dir>/videos/` after the embodiment is
+closed. The flag works with any policy or embodiment that supplies image
+observations. Raw frames are retained; use `inspect-robots video LOG.json` for
+manual or repeat encoding.
 
 ```python
 eval(task, policy, embodiment, log_dir="logs", store_frames=True)
@@ -201,7 +231,7 @@ Stored frames are raw `.npy` arrays, not a video. To watch an episode after
 the fact, render them with the [`video` subcommand](cli.md#inspect-robots-video):
 
 ```bash
-inspect-robots video logs/adhoc_xxxx.json
+inspect-robots video logs/YYYYMMDD_runNNNN/adhoc_xxxx.json
 ```
 
 `inspect-robots inspect` prints the frames directory and this command as a
@@ -243,11 +273,11 @@ the Messages wire, `cache_control` breakpoints — none of which survive into
 `policy_transcripts`. Wire capture stores the real thing, per attempt,
 including retries and the failed calls a run died on.
 
-Layout, under the log directory:
+Layout, under the allocated run directory:
 
 ```
-wire/<run_id>/<trial_id>/calls.jsonl   one JSON row per HTTP attempt
-wire/<run_id>/blobs/<sha256>.png       content-addressed image bytes
+wire/<trial_id>/calls.jsonl   one JSON row per HTTP attempt
+wire/blobs/<sha256>.png       content-addressed image bytes
 ```
 
 Each row records `call`, `attempt`, `endpoint`, `t`, `duration_s`,

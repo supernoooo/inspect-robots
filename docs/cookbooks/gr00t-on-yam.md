@@ -185,7 +185,7 @@ At each episode end the operator answers y/N; the score lands in the
 `gr00t` (not `molmoact2`) in every log:
 
 ```bash
-inspect-robots inspect logs/pour_pasta_*.json
+inspect-robots inspect logs/*_run*/pour_pasta_*.json
 ```
 
 For a different GR00T fine-tune, pass `-P action_horizon=<its chunk length>`

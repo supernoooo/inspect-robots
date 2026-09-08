@@ -38,6 +38,7 @@ single-word instructions use the explicit ``run --instruction`` form.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import fnmatch
 import json
 import math
@@ -245,7 +246,7 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         "--store-frames",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="stream camera frames to a per-run directory under <log-dir>/frames "
+        help="stream camera frames to the allocated <log-dir>/YYYYMMDD_runNNNN/frames "
         "instead of keeping them in memory (--no-store-frames overrides a "
         "store_frames config default)",
     )
@@ -385,6 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="spawn the live Rerun viewer on this port (implies --rerun; "
         "a per-rig rerun_port config key sets the default)",
     )
+    p_run.add_argument(
+        "--save-video",
+        action="store_true",
+        help="capture camera frames during the run and, after the embodiment is "
+        "closed, encode one MP4 per trial/camera under RUN_DIR/videos (needs ffmpeg)",
+    )
 
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
     p_eval_set.add_argument(
@@ -459,8 +466,8 @@ def build_parser() -> argparse.ArgumentParser:
         "view",
         help="render saved eval logs as self-contained HTML reports",
         description=(
-            "Render one EvalLog JSON file, or every top-level *.json in a logs "
-            "directory with a browsable index. A directory log named index.json "
+            "Render one EvalLog JSON file, or every *.json in a logs directory "
+            "and its run subdirectories with a browsable index. A log named index.json "
             "uses index_log.html (or the next collision-free suffix)."
         ),
     )
@@ -474,7 +481,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "output HTML file for one log (default: LOG.html; - writes to stdout), "
+            "output HTML file for one log (default: RUN_DIR/html/LOG.html for grouped logs; "
+            "- writes to stdout), "
             "or output directory for a logs directory (default: LOG_DIR/html)"
         ),
     )
@@ -1375,6 +1383,15 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get(
+        "repo_id"
+    )
+    revision = log.eval.policy_server.get("revision")
+    if checkpoint is not None:
+        identity = str(checkpoint)
+        if revision is not None:
+            identity += f"@{revision}"
+        print(f"{_styled('server checkpoint:', _CYAN)} {_styled(identity, _DIM)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
@@ -1397,7 +1414,8 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
         if root is not None and count_frames(root):
             print(_styled(f"hint: render videos with: inspect-robots video {log_path}", _DIM))
     log_dir = Path(log_path).parent
-    print(_styled(f"hint: browse all logs: inspect-robots view {log_dir}", _DIM))
+    log_root = log_dir.parent if log.eval.run_id == log_dir.name else log_dir
+    print(_styled(f"hint: browse all logs: inspect-robots view {log_root}", _DIM))
 
 
 class _ResolvedComponents(NamedTuple):
@@ -1583,6 +1601,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.rerun_port is not None and args.rerun is False:
         raise SystemExit(
             "--no-rerun disables the live viewer and --rerun-port requests one: pass only one"
+        )
+    if args.save_video and args.store_frames is False:
+        raise SystemExit(
+            "--save-video needs stored camera frames and conflicts with --no-store-frames"
         )
 
     from inspect_robots import eval
@@ -1784,7 +1806,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
                 approver=approver,
                 store_frames=(
-                    args.store_frames if args.store_frames is not None else defaults.store_frames
+                    True
+                    if args.save_video
+                    else (
+                        args.store_frames
+                        if args.store_frames is not None
+                        else defaults.store_frames
+                    )
                 ),
                 operator_input=operator_input,
                 grader=grader,
@@ -1824,7 +1852,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved_recording_path = getattr(rerun_sink, "resolved_recording_path", None)
     if resolved_recording_path:
         print(f"{_styled('rrd:', _CYAN)} {_styled(str(resolved_recording_path), _DIM)}")
-    return 0 if log.status == "success" else 1
+    video_status = 0
+    if args.save_video:
+        log_path = cast(Path, sink.path)
+        video_args = argparse.Namespace(
+            log=str(log_path),
+            out=str(log_path.parent / "videos"),
+            fps=None,
+            ffmpeg=None,
+        )
+        try:
+            video_status = _cmd_video(video_args)
+        except SystemExit as exc:
+            video_status = 1
+            print(f"video export failed: {exc}", file=sys.stderr)
+    return 0 if log.status == "success" and video_status == 0 else 1
 
 
 def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str) -> None:
@@ -1991,6 +2033,15 @@ def _cmd_inspect(
     if shared:
         _print_degraded(f"instruction: {shared}")
     print(f"policy:      {log.eval.policy}")
+    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get(
+        "repo_id"
+    )
+    revision = log.eval.policy_server.get("revision")
+    if checkpoint is not None:
+        identity = str(checkpoint)
+        if revision is not None:
+            identity += f"@{revision}"
+        print(f"checkpoint:  {identity}")
     print(f"embodiment:  {log.eval.embodiment}")
     print(f"run status:  {_display_status(log.status)}")
     outcome = _outcome_line(log)
@@ -2172,6 +2223,16 @@ def _index_entry(log: EvalLog, log_path: Path, page: str) -> IndexEntry:
     )
 
 
+def _directory_log_paths(log_dir: Path) -> list[Path]:
+    """Discover legacy top-level logs plus logs in one run-directory layer."""
+    paths = {path for path in log_dir.glob("*.json") if path.is_file()}
+    for run_dir in log_dir.iterdir():
+        if not run_dir.is_dir() or re.fullmatch(r"\d{8}_run\d+", run_dir.name) is None:
+            continue
+        paths.update(path for path in run_dir.glob("*.json") if path.is_file())
+    return sorted(paths)
+
+
 def _unreadable_index_entry(log_path: Path, error: Exception) -> IndexEntry:
     """Build an error row for a file that is not a readable EvalLog."""
     try:
@@ -2247,9 +2308,9 @@ def _render_view_directory(
     if args.out == "-":
         raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
 
-    log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
+    log_paths = _directory_log_paths(log_dir)
     if not log_paths and not args.serve:
-        raise SystemExit(f"no top-level *.json logs found in {log_dir}")
+        raise SystemExit(f"no *.json logs found in {log_dir} or its run directories")
 
     out_dir = log_dir / "html" if args.out is None else Path(args.out)
     if (out_dir.exists() or out_dir.is_symlink()) and not out_dir.is_dir():
@@ -2261,6 +2322,12 @@ def _render_view_directory(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     page_names = _directory_page_names(log_paths)
+    if args.out is None and not args.serve:
+        for log_path in log_paths:
+            if log_path.parent != log_dir:
+                page_names[log_path] = (
+                    Path("..") / log_path.parent.name / "html" / page_names[log_path]
+                ).as_posix()
     # Derived from this pass's own glob, not the caller's earlier one: a live
     # log appearing between the two globs must not have its freshly rendered
     # page immediately stubbed as an orphan.
@@ -2324,7 +2391,10 @@ def _render_view_directory(
                         ns=(source_stat.st_atime_ns, stamp_ns),
                     )
                 pages_written += 1
-            entries.append(_index_entry(log, log_path, page_name))
+            entry = _index_entry(log, log_path, page_name)
+            if log_path.parent != log_dir:
+                entry = dataclasses.replace(entry, name=log_path.relative_to(log_dir).as_posix())
+            entries.append(entry)
         except FileNotFoundError:
             if is_live_path:
                 continue
@@ -2444,7 +2514,11 @@ def _serve_view_directory(
         while True:
             _serve_sleep(_SERVE_LIVE_RERENDER_SECONDS)
             accumulated_seconds += _SERVE_LIVE_RERENDER_SECONDS
-            live_set = {path.name for path in log_dir.glob("*.live.json")}
+            live_set = {
+                path.relative_to(log_dir).as_posix()
+                for path in _directory_log_paths(log_dir)
+                if path.name.endswith(".live.json")
+            }
             if not (
                 live_set != previous_live_set
                 or live_set
@@ -2491,7 +2565,11 @@ def _serve_view_directory(
 
 def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
     """Render a logs directory and optionally serve it until stopped."""
-    live_set = {path.name for path in log_dir.glob("*.live.json")}
+    live_set = {
+        path.relative_to(log_dir).as_posix()
+        for path in _directory_log_paths(log_dir)
+        if path.name.endswith(".live.json")
+    }
     render_result = _render_view_directory(
         args,
         log_dir,
@@ -2538,11 +2616,14 @@ def _cmd_view(args: argparse.Namespace) -> int:
     stdout_mode = args.out == "-"
     if stdout_mode and args.open:
         raise SystemExit("--open cannot be used with -o -: no file to open")
-    out_path = (
-        None
-        if stdout_mode
-        else (log_path.with_suffix(".html") if args.out is None else Path(args.out))
-    )
+    if stdout_mode:
+        out_path = None
+    elif args.out is not None:
+        out_path = Path(args.out)
+    elif re.fullmatch(r"\d{8}_run\d+", log_path.parent.name):
+        out_path = log_path.parent / "html" / f"{log_path.stem}.html"
+    else:
+        out_path = log_path.with_suffix(".html")
     if out_path is not None and out_path.exists() and out_path.is_dir():
         raise SystemExit(f"--out {out_path} is a directory; pass an HTML file path")
     if out_path is not None and out_path.resolve() == log_path.resolve():

@@ -316,9 +316,9 @@ Live Rerun transcript streaming happens automatically when a Rerun sink is attac
 Wire capture is on by default (`-P wire_capture=false` to disable): every
 request attempt each wire client sends (tool schemas, evicted view, depth
 composites, and cache breakpoints) and every response land in
-`wire/<run_id>/<trial_id>/calls.jsonl` under the log directory, with image
+`wire/<trial_id>/calls.jsonl` under the allocated run directory, with image
 payloads deduplicated as `$blob:<sha256>` references into
-`wire/<run_id>/blobs/`. The format contract lives in the
+`wire/blobs/`. Older cores retain the legacy extra `<run_id>` layer. The format contract lives in the
 `inspect_robots_agent._capture` module docstring; browse captures with
 `inspect-robots view` (Wire section) or `inspect-robots inspect --wire`.
 Requires a core with the `on_trial_start` policy hook; on older cores the

@@ -258,14 +258,14 @@ inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 Pretty-print a saved eval log:
 
 ```bash
-inspect-robots inspect logs/cubepick-reach_*.json
+inspect-robots inspect logs/*_run*/cubepick-reach_*.json
 ```
 
 Distill a saved log into a markdown learnings file:
 
 ```bash
-inspect-robots summarize logs/cubepick-reach_*.json
-inspect-robots summarize logs/cubepick-reach_*.json --model claude-sonnet-4-5
+inspect-robots summarize logs/*_run*/cubepick-reach_*.json
+inspect-robots summarize logs/*_run*/cubepick-reach_*.json --model claude-sonnet-4-5
 ```
 
 Without `--model`, the command writes a deterministic offline digest. With a
@@ -277,7 +277,7 @@ Render a saved eval log as a self-contained HTML report, or a whole logs
 directory as a browsable index (see [Browse your runs](#browse-your-runs)):
 
 ```bash
-inspect-robots view logs/cubepick-reach_*.json
+inspect-robots view logs/*_run*/cubepick-reach_*.json
 inspect-robots view logs/
 ```
 
@@ -285,8 +285,11 @@ Render a `--store-frames` run's camera frames to MP4 videos (needs the
 `ffmpeg` binary on PATH):
 
 ```bash
-inspect-robots video logs/cubepick-reach_*.json
+inspect-robots video logs/*_run*/cubepick-reach_*.json
 ```
+
+Or add `--save-video` to `inspect-robots run`; it captures frames and writes
+the MP4s under that run's `videos/` directory after the embodiment closes.
 
 ### Python API
 

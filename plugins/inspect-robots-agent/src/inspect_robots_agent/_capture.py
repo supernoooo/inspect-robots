@@ -1,8 +1,9 @@
 """Replay-grade, per-attempt LLM wire capture.
 
-Capture is stored below the evaluation log directory as
-``wire/<run_id>/<trial_id>/calls.jsonl`` with decoded image bytes deduplicated
-at ``wire/<run_id>/blobs/<sha256>.png``. Each JSONL row contains ``call``,
+With current cores, capture is stored below the allocated run directory as
+``wire/<trial_id>/calls.jsonl`` with decoded image bytes deduplicated at
+``wire/blobs/<sha256>.png``. Older cores that pass the shared log root retain
+the legacy ``wire/<run_id>/...`` nesting. Each JSONL row contains ``call``,
 ``attempt``, ``endpoint``, ``t``, ``duration_s``, ``request``, ``status``, and
 ``response``; ``error`` is present only for failed attempts.
 There is one row per attempt. ``call`` is the zero-based logical call shared by
@@ -91,10 +92,18 @@ class WireCapture:
                 previous_handle.close()
 
             safe_trial_id = _safe(trial_id)
-            run_dir = Path(log_dir) / "wire" / run_id
+            # New cores pass the already allocated run directory. Keep the old
+            # layout when this plugin is used with an older core or directly.
+            grouped = Path(log_dir).name == run_id
+            run_dir = Path(log_dir) / "wire" if grouped else Path(log_dir) / "wire" / run_id
             self._target_dir = run_dir / safe_trial_id
             self._blob_dir = run_dir / "blobs"
-            self._relative_path = (Path("wire") / run_id / safe_trial_id / "calls.jsonl").as_posix()
+            relative = (
+                Path("wire") / safe_trial_id / "calls.jsonl"
+                if grouped
+                else Path("wire") / run_id / safe_trial_id / "calls.jsonl"
+            )
+            self._relative_path = relative.as_posix()
         except BaseException as exc:
             self._disable(exc)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):

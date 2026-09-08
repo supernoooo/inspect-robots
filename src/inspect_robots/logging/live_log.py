@@ -67,6 +67,7 @@ class LiveLogSink:
         clock: Callable[[], float] = time.monotonic,
     ):
         self.log_dir = Path(log_dir)
+        self._configured_log_dir = self.log_dir
         self.min_write_interval_s = min_write_interval_s
         self._clock = clock
         self.path: Path | None = None
@@ -88,6 +89,13 @@ class LiveLogSink:
         self._last_write_clock: float | None = None
         self._frames_dir: str | None = None
         self._bound_scenes: dict[str, tuple[str | None, dict[str, Any]]] = {}
+
+    def bind_run_dir(self, run_dir: str, run_id: str) -> None:
+        """Write the next in-progress snapshot inside its run directory."""
+        del run_id
+        allocated = Path(run_dir)
+        if self._configured_log_dir == allocated.parent:
+            self.log_dir = allocated
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Bind the frame directory that every snapshot for the next run records."""

@@ -74,7 +74,7 @@ def test_eval_log_round_trips(tmp_path: Path) -> None:
         CubePickEmbodiment(),
         log_dir=str(tmp_path),
     )
-    written = list(tmp_path.glob("*.json"))
+    written = list(tmp_path.rglob("*.json"))
     assert len(written) == 1
     log = read_eval_log(str(written[0]))
     assert isinstance(log, EvalLog)

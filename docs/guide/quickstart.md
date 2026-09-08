@@ -73,13 +73,16 @@ inspect-robots list                                          # all registered co
 inspect-robots list policies                                 # just policies
 inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick -P chunk_size=6
-inspect-robots inspect logs/cubepick-reach_*.json            # print a saved log
-inspect-robots view logs/cubepick-reach_*.json               # render an HTML report
-inspect-robots video logs/cubepick-reach_*.json              # camera frames to MP4
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick --save-video
+inspect-robots inspect logs/*_run*/cubepick-reach_*.json      # print a saved log
+inspect-robots view logs/*_run*/cubepick-reach_*.json         # render an HTML report
+inspect-robots video logs/*_run*/cubepick-reach_*.json        # camera frames to MP4
 ```
 
-`view` writes a self-contained HTML page. `video` needs a run captured with
-`--store-frames` and the `ffmpeg` binary on PATH. Every command is covered in
+`view` writes a self-contained HTML page. `--save-video` captures frames and
+encodes them automatically after a run; `video` does the same encoding for an
+existing `--store-frames` run. Both encoders need the `ffmpeg` binary on PATH.
+Every command is covered in
 [the CLI guide](cli.md).
 
 ## On a real robot

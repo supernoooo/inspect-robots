@@ -54,15 +54,17 @@ class StreamResult:
 def frames_dir_candidates(frames_dir: str, log_path: Path) -> tuple[Path, Path]:
     """The two places a log's frames directory can be, in resolution order.
 
-    ``frames_dir`` is stored as configured at run time (typically relative to
-    the run's CWD). First candidate: the string as-is. Second: derived from
-    the log's location — the log lives directly in ``<log-dir>/`` and frames
-    in ``<log-dir>/frames/<stamp>``, so the log's parent is the log dir at
-    any ``--log-dir`` depth. A log written on Windows stores backslashes,
+    ``frames_dir`` is stored as configured at run time. First candidate: the
+    string as-is. Second: derived from the log's location. Current grouped
+    logs store frames at ``<run-dir>/frames``; legacy logs store them at
+    ``<log-dir>/frames/<stamp>``. A log written on Windows stores backslashes,
     which POSIX ``Path.name`` would not split.
     """
     stamp = PureWindowsPath(frames_dir).name if "\\" in frames_dir else Path(frames_dir).name
-    return Path(frames_dir), log_path.parent / "frames" / stamp
+    relocated = log_path.parent / "frames"
+    if stamp != "frames":
+        relocated /= stamp
+    return Path(frames_dir), relocated
 
 
 def resolve_frames_dir(frames_dir: str, log_path: Path) -> Path | None:

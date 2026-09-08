@@ -233,6 +233,14 @@ def test_frames_dir_resolution_as_is_fallback_miss_and_backslashes(tmp_path: Pat
     _, fallback = frames_dir_candidates(r"logs\frames\stamp", log_path)
     assert fallback == stamp_dir
 
+    # Grouped logs keep ``frames`` directly beside their JSON and remain
+    # resolvable after the whole run directory is moved to another machine.
+    grouped_log = tmp_path / "moved" / "20260908_run0001" / "eval.json"
+    grouped_frames = grouped_log.parent / "frames"
+    grouped_frames.mkdir(parents=True)
+    old_absolute = "/old/machine/logs/20260908_run0001/frames"
+    assert resolve_frames_dir(old_absolute, grouped_log) == grouped_frames
+
 
 @pytest.mark.parametrize(
     ("control_hz", "expected"),

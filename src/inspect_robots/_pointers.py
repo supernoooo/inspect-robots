@@ -29,9 +29,10 @@ def resolve_log_pointer(log_path: Path, pointer: object) -> Path | None:
 def derive_blob_dir(log_path: Path, target: Path) -> Path | None:
     """Derive a wire sidecar's run-scoped blobs dir, refusing to leave the log dir.
 
-    ``target`` is a ``resolve_log_pointer`` result for ``wire/<run>/<trial>/calls.jsonl``;
-    a shallower hand-crafted pointer would put ``parent.parent`` above the
-    guarded root, so the derivation re-checks containment.
+    ``target`` is a ``resolve_log_pointer`` result for the current
+    ``wire/<trial>/calls.jsonl`` or legacy ``wire/<run>/<trial>/calls.jsonl``;
+    a shallower hand-crafted pointer would put ``parent.parent`` above the guarded
+    root, so the derivation re-checks containment.
     """
     blob_dir = target.parent.parent / "blobs"
     if not blob_dir.is_relative_to(log_path.parent.resolve()):

@@ -225,7 +225,7 @@ def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) ->
             store_frames=True,
         )
 
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     log = read_eval_log(str(written))
     scene = log.samples[0]
     assert log.status == "cancelled"
@@ -318,7 +318,7 @@ def test_cancelled_first_scene_halts_before_second_scene(tmp_path: Path) -> None
             log_dir=str(tmp_path),
         )
 
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     log = read_eval_log(str(written))
     assert log.results.total_scenes == 1
     assert tuple(scene.scene_id for scene in log.samples) == ("s0",)
@@ -348,7 +348,7 @@ def test_all_errored_guard_does_not_rewrite_cancelled_status(tmp_path: Path) -> 
             log_dir=str(tmp_path),
         )
 
-    (written,) = tmp_path.glob("*.json")
+    (written,) = tmp_path.rglob("*.json")
     log = read_eval_log(str(written))
     assert log.status == "cancelled"
     assert log.error == "cancelled by user (KeyboardInterrupt)"
@@ -404,7 +404,7 @@ def test_halted_eval_with_pass_at_k_reducer_still_writes_log(tmp_path: Path) -> 
     # a None reason next to its empty epoch entry.
     assert log.samples[0].termination_reasons == ("success", "success", None)
     assert len(log.samples[0].termination_reasons) == len(log.samples[0].epochs)
-    assert list(tmp_path.glob("*.json"))  # the log reached disk
+    assert list(tmp_path.rglob("*.json"))  # the log reached disk
 
 
 def test_categorical_scorer_with_mean_reducer_degrades_to_error_log(tmp_path: Path) -> None:
@@ -604,6 +604,9 @@ def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
 
+        def bind_run_dir(self, run_dir: str, run_id: str) -> None:
+            self.calls.append(("bind_run_dir", run_dir, run_id))
+
         def bind_frames_dir(self, frames_dir: str | None) -> None:
             self.calls.append(("bind_frames_dir", frames_dir))
 
@@ -637,6 +640,11 @@ def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
     assert log.status == "success"
     assert aware.calls == [
         (
+            "bind_run_dir",
+            str(tmp_path / str(log.eval.run_id)),
+            log.eval.run_id,
+        ),
+        (
             "bind_spaces",
             embodiment.info.action_space,
             embodiment.info.observation_space,
@@ -645,6 +653,8 @@ def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
         ("bind_scenes", task.scenes),
         ("on_eval_start",),
     ]
+    assert getattr(no_hook, "bind_run_dir", None) is None
+    assert getattr(odd, "bind_run_dir", None) is None
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
     assert getattr(no_hook, "bind_frames_dir", None) is None
@@ -1251,7 +1261,7 @@ def test_eval_operator_message_source_round_trips_through_written_log(tmp_path: 
 
     expected = (({"t": 0, "text": "persist this feedback", "source": "voice"},),)
     assert log.samples[0].operator_messages == expected
-    (path,) = tmp_path.glob("*.json")
+    (path,) = tmp_path.rglob("*.json")
     restored_messages = read_eval_log(str(path)).samples[0].operator_messages
     assert isinstance(restored_messages, tuple)
     assert isinstance(restored_messages[0], tuple)
@@ -1280,9 +1290,10 @@ def test_on_trial_start_runs_before_each_trials_first_act(tmp_path: Path) -> Non
     eval(_task(epochs=2), _StartHookPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
 
     starts = [event for event in events if event[0] == "start"]
+    run_dir = tmp_path / str(starts[0][4])
     assert [(event[1], event[2], event[3]) for event in starts] == [
-        ("s0", 0, str(tmp_path)),
-        ("s0", 1, str(tmp_path)),
+        ("s0", 0, str(run_dir)),
+        ("s0", 1, str(run_dir)),
     ]
     assert starts[0][4] == starts[1][4]
     for epoch in range(2):
@@ -1360,7 +1371,7 @@ def test_raising_on_trial_start_skips_rollout_but_keeps_results_parallel(
     assert [record.epoch for record in sink.records] == [0, 1]
     assert sink.records[0].status == "error"
     assert sink.records[0].error == scene.error
-    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(list(tmp_path.rglob("*.json"))) == 1
 
 
 def test_raising_on_trial_start_counts_toward_fail_on_error(tmp_path: Path) -> None:
@@ -1382,7 +1393,7 @@ def test_raising_on_trial_start_counts_toward_fail_on_error(tmp_path: Path) -> N
     assert log.results.total_trials == 2
     assert log.results.errored_trials == 1
     assert len(log.samples[0].epochs) == 2
-    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(list(tmp_path.rglob("*.json"))) == 1
 
 
 def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: Path) -> None:

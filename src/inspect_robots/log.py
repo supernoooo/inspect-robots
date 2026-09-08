@@ -8,7 +8,8 @@ guarantee enforced by golden tests in a later step).
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
 dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
-``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``, and
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``policy_server`` /
+``embodiment_info``, and
 ``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
 ``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
@@ -54,7 +55,12 @@ class EvalSpec:
     created: str
     inspect_robots_version: str
     git_commit: str | None = None
+    # Stable directory/run identity allocated before any artifacts are written.
+    run_id: str | None = None
     policy_config: dict[str, Any] = field(default_factory=dict)
+    # Best-effort identity returned by a remote policy server's health endpoint.
+    # The default keeps schema-v1 logs written before this field readable.
+    policy_server: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     max_steps: int | None = None

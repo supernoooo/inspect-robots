@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
-import uuid
+import urllib.error
+import urllib.request
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
@@ -91,16 +93,67 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_RUN_DIR_RE = re.compile(r"^(?P<date>\d{8})_run(?P<number>\d+)$")
+
+
+def _allocate_run_dir(log_dir: str) -> tuple[str, Path]:
+    """Atomically allocate ``YYYYMMDD_runNNNN`` below the configured log root."""
+    root = Path(log_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    date = datetime.now().astimezone().strftime("%Y%m%d")
+    used = {
+        int(match.group("number"))
+        for path in root.iterdir()
+        if path.is_dir() and (match := _RUN_DIR_RE.fullmatch(path.name)) is not None
+        and match.group("date") == date
+    }
+    number = max(used, default=0) + 1
+    while True:
+        run_id = f"{date}_run{number:04d}"
+        run_dir = root / run_id
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        return run_id, run_dir
+
+
+def _policy_server_metadata(policy: Policy) -> dict[str, Any]:
+    """Fetch JSON identity from an HTTP action server without making it mandatory."""
+    try:
+        base_url = getattr(policy, "server_url", None)
+    except Exception:
+        return {}
+    if not isinstance(base_url, str) or not base_url.startswith(("http://", "https://")):
+        return {}
+    try:
+        metadata_url = getattr(policy, "server_metadata_url", None)
+    except Exception:
+        metadata_url = None
+    if not isinstance(metadata_url, str) or not metadata_url:
+        metadata_url = base_url.rstrip("/") + "/act"
+    result: dict[str, Any] = {"url": base_url, "metadata_url": metadata_url}
+    try:
+        with urllib.request.urlopen(metadata_url, timeout=3.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if isinstance(payload, dict):
+            result.update(_json_safe_scene_metadata(payload))
+    except (OSError, UnicodeError, ValueError, urllib.error.URLError) as exc:
+        result["probe_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def _write_action_log(
     record: TrialRecord,
-    log_dir: str,
-    run_stamp: str,
+    run_dir: str,
+    run_id: str,
     action_space: Box,
 ) -> str | None:
     """Atomically persist one trial's executed actions, degrading on write failure."""
     trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
-    relative_path = Path("actions") / run_stamp / f"{trial_id}.jsonl"
-    path = Path(log_dir) / relative_path
+    relative_path = Path("actions") / f"{trial_id}.jsonl"
+    path = Path(run_dir) / relative_path
     semantics = action_space.semantics
     labels = semantics.dim_labels if semantics is not None else None
     try:
@@ -108,7 +161,7 @@ def _write_action_log(
             json.dumps(
                 {
                     "kind": "header",
-                    "run_id": run_stamp,
+                    "run_id": run_id,
                     "scene_id": record.scene_id,
                     "epoch": record.epoch,
                     "action_dim": action_space.dim,
@@ -204,6 +257,13 @@ class _Broadcast:
             hook = getattr(sink, "bind_spaces", None)
             if callable(hook):
                 hook(action_space, observation_space)
+
+    def bind_run_dir(self, run_dir: str, run_id: str) -> None:
+        """Offer the allocated artifact directory to sinks that support rebinding."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_run_dir", None)
+            if callable(hook):
+                hook(run_dir, run_id)
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Offer the run's frame directory to sinks that declare the optional hook."""
@@ -426,14 +486,13 @@ def _run_eval(
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 
-    # One subdirectory per run: trial ids repeat across runs (scene-epoch),
-    # so a shared directory would silently overwrite the previous run's
-    # frames or transcripts.
-    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+    # Allocate before any sink or side-car writes. The atomic mkdir loop keeps
+    # simultaneous launchers from selecting the same sequence number.
+    run_stamp, run_dir = _allocate_run_dir(log_dir)
 
     frame_store: FrameStore | None = None
     if store_frames:
-        frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
+        frame_store = FrameStore(str(run_dir / "frames"))
 
     spec = EvalSpec(
         task=task.name,
@@ -442,7 +501,9 @@ def _run_eval(
         created=_now_iso(),
         inspect_robots_version=__version__,
         git_commit=_git_commit(),
+        run_id=run_stamp,
         policy_config=asdict(policy.config),
+        policy_server=_policy_server_metadata(policy),
         embodiment_info={
             "control_hz": embodiment.info.control_hz,
             "is_simulated": embodiment.info.is_simulated,
@@ -452,6 +513,7 @@ def _run_eval(
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
     )
+    bus.bind_run_dir(str(run_dir), run_stamp)
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
     bus.bind_scenes(task.scenes)
@@ -498,7 +560,7 @@ def _run_eval(
             on_trial_start = getattr(policy, "on_trial_start", None)
             if callable(on_trial_start):
                 try:
-                    on_trial_start(scene.id, epoch, log_dir, run_stamp)
+                    on_trial_start(scene.id, epoch, str(run_dir), run_stamp)
                 except Exception as exc:
                     policy_start_failed = True
                     error_count += 1
@@ -623,7 +685,7 @@ def _run_eval(
                     on_trial_end = getattr(policy, "on_trial_end", None)
                     if callable(on_trial_end):
                         try:
-                            on_trial_end(record, log_dir, run_stamp)
+                            on_trial_end(record, str(run_dir), run_stamp)
                         except Exception as exc:
                             # Named `detail`, not `note`: a grader's note is a
                             # different thing entirely and is collected just above.
@@ -639,7 +701,7 @@ def _run_eval(
                 if store_actions:
                     actions_path = _write_action_log(
                         record,
-                        log_dir,
+                        str(run_dir),
                         run_stamp,
                         embodiment.info.action_space,
                     )

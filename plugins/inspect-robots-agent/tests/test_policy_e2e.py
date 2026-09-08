@@ -506,7 +506,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
         env={},
     )
 
-    ir_eval(
+    logs = ir_eval(
         _task(max_steps=20),
         policy,
         _VisionAbsoluteEmbodiment(),
@@ -517,7 +517,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     (record,) = sink.records
     pointer = record.metadata["wire_capture"]
     assert isinstance(pointer, str)
-    capture_path = tmp_path / pointer
+    capture_path = tmp_path / str(logs[0].eval.run_id) / pointer
     assert capture_path.is_file()
     rows = _wire_rows(capture_path)
     row = next(row for row in rows if row["call"] == 1 and row["attempt"] == 0)
@@ -2652,7 +2652,7 @@ def test_on_trial_end_writes_transcript_and_strips_images(tmp_path: Path) -> Non
     assert transcript_rel.startswith("transcripts/")
 
     # Transcript should exist on disk
-    transcript_path = tmp_path / transcript_rel
+    transcript_path = tmp_path / str(logs[0].eval.run_id) / transcript_rel
     assert transcript_path.is_file()
 
     # Verify the JSONL content and image stripping

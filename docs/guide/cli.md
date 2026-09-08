@@ -373,11 +373,16 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
 `PolicyError`s (`1` = first error, `0<X<1` = proportion, `X>1` = count), and
 `--store-frames` streams camera frames to a per-run subdirectory of
-`<log-dir>/frames` (trial ids repeat across runs, so each run gets its own
+`<log-dir>/YYYYMMDD_runNNNN/frames` (trial ids repeat across runs, so each run gets its own
 directory; the log's `stats.frames_dir` records the exact path). A
 `store_frames = true` config default enables capture on every run;
 `--no-store-frames` disables it for one invocation. When the run finishes,
 the path of the written log is printed.
+
+`--save-video` implies `--store-frames` and, after the embodiment has closed,
+encodes one MP4 per trial and camera into the run's `videos/` directory. This
+keeps ffmpeg from competing with a simulator for GPU or renderer resources.
+It requires `ffmpeg` on PATH and conflicts with `--no-store-frames`.
 
 `--rerun` and `--rerun-connect` also save the viewed stream as a `.rrd` under
 `<log-dir>` by default. Replay it with `rerun <file>`. Pass `--no-rerun-save`,
@@ -500,7 +505,7 @@ inspect-robots doctor --embodiment my_arms
 Print a summary of a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog):
 
 ```bash
-inspect-robots inspect logs/cubepick-reach_xxxx.json
+inspect-robots inspect logs/20260908_run0001/cubepick-reach_xxxx.json
 ```
 
 ```text
@@ -529,7 +534,7 @@ For runs whose policy recorded conversations (such as `--policy agent`),
 `--transcript` appends each trial's recorded transcript after the summary:
 
 ```bash
-inspect-robots inspect logs/cubepick-reach_xxxx.json --transcript
+inspect-robots inspect logs/20260908_run0001/cubepick-reach_xxxx.json --transcript
 ```
 
 ## `inspect-robots summarize`
@@ -538,7 +543,7 @@ Distill a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) into a markdown
 learnings file:
 
 ```bash
-inspect-robots summarize logs/cubepick-reach_xxxx.json
+inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json
 ```
 
 Without `--model`, the command works offline and writes a deterministic digest
@@ -551,7 +556,7 @@ With `--model`, the digest and the tail of each recorded policy transcript are
 sent to an OpenAI-compatible chat-completions endpoint:
 
 ```bash
-inspect-robots summarize logs/cubepick-reach_xxxx.json \
+inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json \
   --model claude-sonnet-4-5
 ```
 
@@ -570,7 +575,7 @@ system prompt after any embodiment notes, framed as hints that may be stale
 (the current observation always wins):
 
 ```bash
-inspect-robots summarize logs/cubepick-reach_xxxx.json --model claude-sonnet-4-5
+inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json --model claude-sonnet-4-5
 inspect-robots "place the fork on the plate" --policy agent \
     -P prior_learnings=logs/learnings/cubepick-reach_xxxx.md
 ```
@@ -587,7 +592,7 @@ Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained
 report:
 
 ```bash
-inspect-robots view logs/cubepick-reach_xxxx.json
+inspect-robots view logs/20260908_run0001/cubepick-reach_xxxx.json
 ```
 
 The report puts the run status, configuration, metrics, scene results, and
@@ -600,7 +605,9 @@ raw observation, state dumps, calls, and tool results. Non-chat transcripts
 remain available as bounded JSON.
 
 For runs captured with `--store-frames`, the report embeds the stored camera
-frames at the exact observation turns where the model saw them. When ffmpeg is
+frames at the exact observation turns where a transcript records them. Policies
+without transcripts receive a bounded, evenly sampled camera flipbook for each
+trial, so a headless simulation remains visually inspectable. When ffmpeg is
 available, a completed report rendered outside `--serve` also embeds one
 side-by-side composite MP4 above each trial transcript at the recorded control
 rate. Its caption names the cameras in left-to-right order, and one playhead
@@ -641,7 +648,7 @@ Render a `--store-frames` run's stored camera frames into one MP4 per
 (trial, camera) stream:
 
 ```bash
-inspect-robots video logs/adhoc_xxxx.json
+inspect-robots video logs/20260908_run0001/adhoc_xxxx.json
 ```
 
 ```text

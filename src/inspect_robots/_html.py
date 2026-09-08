@@ -30,6 +30,7 @@ _FRAME_LABEL_RE = re.compile(r"camera '(?P<name>.*)' \(step (?P<step>\d{1,12})\)
 _FRAME_PLACEHOLDER = "[image omitted: streamed camera frame]"
 _FRAME_MAX_SIDE = 448
 _VIDEO_BUDGET_BYTES = 30_000_000
+_GENERIC_FLIPBOOK_FRAMES_PER_CAMERA = 12
 _BLOB_SENTINEL_RE = re.compile(r"\$blob:([^\s]+)")
 _BLOB_SHA_RE = re.compile(r"[0-9a-f]{64}")
 _CAMERA_FRAME_RE = re.compile(r"^(.+)_(\d{6,})\.npy$")
@@ -1037,18 +1038,69 @@ def _document_frame_references(log: EvalLog) -> tuple[_FrameReference, ...]:
     return tuple(references)
 
 
+def _sample_stream_frames(
+    frames: Sequence[tuple[int, Path]], *, newest: bool
+) -> tuple[tuple[int, Path], ...]:
+    """Select a bounded, ordered flipbook from a raw camera stream."""
+    limit = _GENERIC_FLIPBOOK_FRAMES_PER_CAMERA
+    if len(frames) <= limit:
+        return tuple(frames)
+    if newest:
+        return tuple(frames[-limit:])
+    # Include both endpoints and distribute the remaining samples over the
+    # complete trial. Integer arithmetic keeps the selection deterministic.
+    indices = [index * (len(frames) - 1) // (limit - 1) for index in range(limit)]
+    return tuple(frames[index] for index in indices)
+
+
+def _generic_trial_frame_keys(
+    log: EvalLog, frames_dir: Path
+) -> tuple[tuple[str, str, int], ...]:
+    """Return recent raw-frame keys for trials without transcript references."""
+    keys: list[tuple[str, str, int]] = []
+    for scene in log.samples:
+        trial_count = max(
+            len(scene.epochs),
+            len(scene.policy_transcripts),
+            len(scene.trial_metadata),
+        )
+        for trial in range(trial_count):
+            transcript = (
+                scene.policy_transcripts[trial]
+                if trial < len(scene.policy_transcripts)
+                else None
+            )
+            trial_prefix = _safe(f"{scene.scene_id}-e{trial}")
+            if _frame_references(transcript, trial_prefix):
+                continue
+            streams = _trial_camera_streams(frames_dir, trial_prefix)
+            for camera, frames in streams.items():
+                keys.extend(
+                    (trial_prefix, camera, step)
+                    for step, _path in _sample_stream_frames(
+                        frames, newest=log.status == "started"
+                    )
+                )
+    return tuple(keys)
+
+
 def _prime_live_frame_cache(log: EvalLog, frame_ctx: _FrameContext) -> None:
     """Allocate the shared live budget to valid frames from newest to oldest."""
     budget = frame_ctx.budget
     cache = cast(dict[tuple[str, str, int], str], budget.cache)
     attempted: set[tuple[str, str, int]] = set()
-    for reference in reversed(_document_frame_references(log)):
-        key = (reference.trial_prefix, reference.camera, reference.step)
+    referenced = tuple(
+        (reference.trial_prefix, reference.camera, reference.step)
+        for reference in _document_frame_references(log)
+    )
+    candidates = referenced + _generic_trial_frame_keys(log, frame_ctx.frames_dir)
+    for key in reversed(candidates):
         if key in attempted:
             continue
         attempted.add(key)
-        trial_ctx = _FrameContext(frame_ctx.frames_dir, reference.trial_prefix, budget)
-        array = _load_frame(trial_ctx, reference.camera, reference.step)
+        trial_prefix, camera, step = key
+        trial_ctx = _FrameContext(frame_ctx.frames_dir, trial_prefix, budget)
+        array = _load_frame(trial_ctx, camera, step)
         if array is None:
             continue
         source = png_data_url(array)
@@ -1335,6 +1387,9 @@ def _render_trial_media(
     trial_prefix: str,
     rendered_frames: Sequence[tuple[str, int]],
     context: _VideoContext,
+    frame_ctx: _FrameContext | None,
+    *,
+    newest_frames: bool,
 ) -> str:
     """Render one composite MP4 when eligible and flipbook panels otherwise."""
     flipbook: dict[str, list[int]] = {}
@@ -1343,10 +1398,10 @@ def _render_trial_media(
     display_names = {_safe(camera): camera for camera in flipbook}
 
     available_streams = (
-        _trial_camera_streams(frames_dir, trial_prefix)
-        if context.enabled and frames_dir is not None
-        else {}
+        _trial_camera_streams(frames_dir, trial_prefix) if frames_dir is not None else {}
     )
+    for camera in available_streams:
+        display_names.setdefault(camera, camera)
     streams = available_streams if context.ffmpeg is not None else {}
     if context.enabled and context.ffmpeg is None and (available_streams or flipbook):
         _warn_video_degrade(context, "ffmpeg not found")
@@ -1360,11 +1415,6 @@ def _render_trial_media(
             rendered_order.get(display_names.get(item[0], item[0]), default_order),
             item[0],
         ),
-    )
-    fallback_cameras = tuple(
-        dict.fromkeys(
-            [display_names.get(key, key) for key, _frames in streams.items()] + list(flipbook)
-        )
     )
     if ordered_streams and not context.budget.truncated:
         from inspect_robots._video import _encode_composite_mp4
@@ -1395,6 +1445,33 @@ def _render_trial_media(
                 )
             context.budget.truncated = True
 
+    source_markup = ""
+    if not flipbook and available_streams and frame_ctx is not None:
+        generic_rendered: list[tuple[str, int]] = []
+        trial_ctx = _FrameContext(
+            frame_ctx.frames_dir,
+            trial_prefix,
+            frame_ctx.budget,
+            generic_rendered,
+        )
+        sources: list[str] = []
+        for camera, frames in available_streams.items():
+            for step, _path in _sample_stream_frames(frames, newest=newest_frames):
+                rendered = _frame_image(trial_ctx, camera, step)
+                if rendered is not None:
+                    sources.append(rendered)
+        for camera, step in generic_rendered:
+            flipbook.setdefault(camera, []).append(step)
+        if sources:
+            source_markup = (
+                '<div class="media-frame-sources" hidden>' + "".join(sources) + "</div>"
+            )
+
+    fallback_cameras = tuple(
+        dict.fromkeys(
+            [display_names.get(key, key) for key in available_streams] + list(flipbook)
+        )
+    )
     # Sticky, first-wins: once one trial composite overflows, later trials
     # degrade without paying an encode for a discarded payload.
     reason = (
@@ -1404,7 +1481,9 @@ def _render_trial_media(
         if context.enabled and context.ffmpeg is None
         else None
     )
-    return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
+    return source_markup + _render_flipbook_media(
+        trial_prefix, flipbook, fallback_cameras, reason
+    )
 
 
 def _render_flipbook_media(
@@ -1530,10 +1609,36 @@ def _scene_section(
     notes_block = "" if not notes else f"<h3>Grader notes</h3>{notes}"
     transcript_blocks: list[str] = []
     residual: list[tuple[int, dict[str, Any]]] = []
-    for trial, transcript in enumerate(scene.policy_transcripts):
+    trial_count = max(
+        len(scene.epochs),
+        len(scene.policy_transcripts),
+        len(scene.operator_messages),
+        len(scene.trial_metadata),
+    )
+    for trial in range(trial_count):
+        transcript = (
+            scene.policy_transcripts[trial] if trial < len(scene.policy_transcripts) else None
+        )
         messages = scene.operator_messages[trial] if trial < len(scene.operator_messages) else ()
-        if transcript is None:
+        has_transcript = transcript is not None and not (
+            isinstance(transcript, list) and not transcript
+        )
+        if not has_transcript:
             residual.extend((trial, message) for message in messages)
+            trial_prefix = _safe(f"{scene.scene_id}-e{trial}")
+            media = _render_trial_media(
+                frames_dir,
+                trial_prefix,
+                (),
+                video_context,
+                frame_ctx,
+                newest_frames=log_started,
+            )
+            if media:
+                transcript_blocks.append(
+                    '<details class="transcript media-only" open>'
+                    f"<summary>Trial {trial} cameras</summary>{media}</details>"
+                )
             continue
         rendered, unplaced, rendered_frames = _render_trial_transcript(
             transcript,
@@ -1544,13 +1649,18 @@ def _scene_section(
         )
         residual.extend((trial, message) for message in unplaced)
         trial_prefix = _safe(f"{scene.scene_id}-e{trial}")
-        media = _render_trial_media(frames_dir, trial_prefix, rendered_frames, video_context)
+        media = _render_trial_media(
+            frames_dir,
+            trial_prefix,
+            rendered_frames,
+            video_context,
+            frame_ctx,
+            newest_frames=log_started,
+        )
         transcript_blocks.append(
             f'<details class="transcript"{" open" if open_transcript else ""}>'
             f"<summary>Trial {trial} transcript</summary>{media}{rendered}</details>"
         )
-    for trial in range(len(scene.policy_transcripts), len(scene.operator_messages)):
-        residual.extend((trial, message) for message in scene.operator_messages[trial])
     transcripts = "".join(transcript_blocks)
     feedback = "".join(
         (
@@ -1607,11 +1717,20 @@ def render_html(
         else f"git {_escape(log.eval.git_commit)}"
     )
     definitions = [
+        *(
+            [_definition("run id", log.eval.run_id)]
+            if log.eval.run_id is not None
+            else []
+        ),
         _definition("policy", log.eval.policy),
         _definition("embodiment", log.eval.embodiment),
     ]
     definitions.extend(
         _definition(key, _value(value)) for key, value in sorted(log.eval.policy_config.items())
+    )
+    definitions.extend(
+        _definition(f"server {key}", _value(value))
+        for key, value in sorted(log.eval.policy_server.items())
     )
     if log.eval.seed is not None:
         definitions.append(_definition("seed", log.eval.seed))
@@ -1652,7 +1771,9 @@ def render_html(
     )
 
     transcript_count = sum(
-        transcript is not None for scene in log.samples for transcript in scene.policy_transcripts
+        transcript is not None and not (isinstance(transcript, list) and not transcript)
+        for scene in log.samples
+        for transcript in scene.policy_transcripts
     )
     effective_budget = frames_budget_bytes
     if live_frames_budget_bytes is not None:

@@ -237,6 +237,7 @@ class RerunSink:
             raise ValueError(f"spawn_port must be in 1-65535, got {spawn_port}")
         self.recording_path = recording_path
         self.recording_dir = recording_dir
+        self._configured_recording_dir = recording_dir
         self.resolved_recording_path: Path | None = None
         self.application_id = application_id
         self.spawn = spawn
@@ -268,6 +269,15 @@ class RerunSink:
         self._state_lengths: dict[str, int] = {}
         self._blueprint_prefix: str | None = None
         self._blueprint_warned = False
+
+    def bind_run_dir(self, run_dir: str, run_id: str) -> None:
+        """Place directory-configured recordings beside the run's other artifacts."""
+        del run_id
+        if (
+            self._configured_recording_dir is not None
+            and Path(self._configured_recording_dir) == Path(run_dir).parent
+        ):
+            self.recording_dir = run_dir
 
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Distill the resolved spaces into the fields the blueprint needs.

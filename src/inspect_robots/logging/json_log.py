@@ -68,7 +68,15 @@ class JsonLogSink:
 
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
+        self._configured_log_dir = self.log_dir
         self.path: Path | None = None
+
+    def bind_run_dir(self, run_dir: str, run_id: str) -> None:
+        """Write the next final log inside its allocated run directory."""
+        del run_id
+        allocated = Path(run_dir)
+        if self._configured_log_dir == allocated.parent:
+            self.log_dir = allocated
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Defer output until the final immutable log is available."""

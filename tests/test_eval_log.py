@@ -265,8 +265,8 @@ def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
         max_steps=60,
     )
     eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
-    assert list(tmp_path.glob("*.json"))
-    assert not list(tmp_path.glob("*.tmp"))  # atomic temp+rename left nothing behind
+    assert list(tmp_path.rglob("*.json"))
+    assert not list(tmp_path.rglob("*.tmp"))  # atomic temp+rename left nothing behind
 
 
 def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
@@ -304,7 +304,7 @@ def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
     # fact (as an adapter might mid-run) must not reach into the log.
     cast(dict[str, Any], task.scenes[0].metadata["nested"])["thresholds"].append(object())
     assert log.samples[0].scene_metadata["nested"] == {"thresholds": [1, 2]}
-    written = read_eval_log(str(next(tmp_path.glob("*.json"))))
+    written = read_eval_log(str(next(tmp_path.rglob("*.json"))))
     assert written.samples[0].scene_metadata == log.samples[0].scene_metadata
 
 
@@ -321,7 +321,7 @@ def test_store_frames_writes_side_cars(tmp_path: Path) -> None:
         task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), store_frames=True
     )
     assert logs[0].stats.frames_dir is not None
-    assert list((tmp_path / "frames").rglob("*.npy"))
+    assert list(Path(logs[0].stats.frames_dir).rglob("*.npy"))
 
 
 def test_eval_set_runs_multiple_tasks(tmp_path: Path) -> None:
@@ -376,7 +376,7 @@ def test_eval_set_reports_failed_task_and_keeps_completed_logs(tmp_path: Path) -
     assert logs[1].eval.embodiment == "cubepick"
     assert logs[1].eval.max_steps == bad.max_steps
     assert logs[1].samples == ()
-    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(list(tmp_path.rglob("*.json"))) == 1
 
 
 def test_eval_set_error_log_preserves_string_component_names(tmp_path: Path) -> None:

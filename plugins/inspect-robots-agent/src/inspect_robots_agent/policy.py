@@ -830,7 +830,12 @@ class LLMAgentPolicy(PolicyBase):
         if not messages:
             return
 
-        transcript_dir = Path(log_dir) / "transcripts" / run_id
+        grouped = Path(log_dir).name == run_id
+        transcript_dir = (
+            Path(log_dir) / "transcripts"
+            if grouped
+            else Path(log_dir) / "transcripts" / run_id
+        )
         transcript_dir.mkdir(parents=True, exist_ok=True)
 
         trial_id = f"{record.scene_id}-e{record.epoch}"
@@ -841,7 +846,11 @@ class LLMAgentPolicy(PolicyBase):
                 f.write(json.dumps(msg) + "\n")
 
         # Make path relative to log_dir for portability
-        record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
+        record.metadata["transcript"] = (
+            f"transcripts/{trial_id}.jsonl"
+            if grouped
+            else f"transcripts/{run_id}/{trial_id}.jsonl"
+        )
         if self._calls_used:
             record.metadata["llm_usage"] = {
                 "llm_calls": self._calls_used,

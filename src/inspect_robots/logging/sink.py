@@ -14,13 +14,19 @@ Sinks must not mutate the supplied messages. The extension deliberately stays
 off both ``LogSink`` and ``NullSink``: it must not change structural protocol
 conformance or advertise a no-op that makes policies build transcript deltas.
 
-A second duck-typed extension, ``bind_spaces(action_space, observation_space)``,
+A second duck-typed extension, ``bind_run_dir(run_dir, run_id)``, is called by
+``eval()`` exactly once per run, before the other bind hooks and
+``on_eval_start``. Built-in file sinks use it to move directory-configured
+outputs into the atomically allocated ``YYYYMMDD_runNNNN`` directory. A callable
+with this claimed name MUST accept those two string arguments.
+
+A third duck-typed extension, ``bind_spaces(action_space, observation_space)``,
 is called by ``eval()`` exactly once per run, before ``on_eval_start``, with the
 resolved embodiment ``Box`` and ``ObservationSpace``. A sink that defines a
 callable ``bind_spaces`` MUST accept this two-argument signature; like
 ``log_policy_messages``, the name is claimed by the eval loop.
 
-A third duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
+A fourth duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
 ``eval()`` exactly once per run, after ``bind_spaces`` and before
 ``on_eval_start``. The argument is the run's stored-frame directory as a string,
 or ``None`` when frame storage is off. A callable with this claimed name MUST
