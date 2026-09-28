@@ -508,15 +508,41 @@ Cap-X 会在评测进程内执行模型生成的 Python，它不是安全沙箱�
 | `--epochs N` | 每个 Scene 重复 N 次 |
 | `--max-steps N` | ad-hoc/auto task 的步数上限；注册 Task 用自己的 horizon |
 | `--fail-on-error X` | PolicyError 达到指定次数/比例后停止 |
-| `--log-dir DIR` | 日志目录，默认 `logs` |
+| `--log-dir DIR` | 日志根目录，默认 `logs`；每次运行自动分配 `DATE-runXXX/` |
 | `--no-live-log` | 不写供 live HTML 使用的临时快照 |
 | `--config PATH` | 为某台 rig 选择独立配置文件 |
+
+YAM 启动脚本默认按 agent 分开保存：`logs/yam/claude`、`logs/yam/claude-api`、
+`logs/yam/gpt`、`logs/yam/gemini`、`logs/yam/grok`。直接使用 CLI 时，传入
+`--log-dir logs/yam/claude --store-frames`（其他 agent 替换目录名）。例如：
+
+```text
+logs/yam/claude/20260928-run001/
+├── 20260928-run001.json   # 任务、模型、结果、错误和附件路径
+├── actions/              # 实际执行的动作 JSONL
+├── frames/               # 相机原始帧 .npy；需要 --store-frames
+├── transcripts/          # agent 对话 JSONL
+├── wire/                 # 模型请求/响应及图像 blobs；需要 wire capture
+├── html/                 # inspect-robots view 生成
+└── 20260928-run001.rrd    # 可选：需要 --rerun-save
+```
+
+日期取本机时区，每个 agent 目录每天独立从 `run001` 递增；并发运行不会覆盖。
+新目录和同名文件统一使用小写 `run`；旧大写目录仍可读取，也计入当天序号。
+模型名称与任务内容保存在 JSON 中，不再额外创建模型/任务子目录。
+运行期间会有同名 `.live.json` 快照，结束后保留最终 `.json`。
+旧日志不会被移动或重命名，仍然可查看：
+
+```bash
+inspect-robots view logs/yam/claude
+inspect-robots inspect logs/yam/claude/20260928-run001/20260928-run001.json --transcript
+```
 
 ### 7.3 图像、可视化和交互
 
 | 参数 | 含义 |
 |---|---|
-| `--store-frames` | 将相机帧写到 `logs/frames/...`，供 HTML、视频、VLM grader 使用 |
+| `--store-frames` | 将相机帧写到 `<log-dir>/DATE-runXXX/frames/`，供 HTML、视频、VLM grader 使用 |
 | `--rerun` | 启动本地 Rerun Viewer |
 | `--rerun-save` | 保存 `.rrd`；可以不启动 GUI |
 | `--no-rerun` | 禁止本地 GUI |

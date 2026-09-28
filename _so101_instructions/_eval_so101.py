@@ -71,6 +71,8 @@ def main() -> int:
     parser.add_argument("--instruction", default=BOTTLE_INSTRUCTION)
     parser.add_argument("--max-llm-calls", type=int, default=60)
     parser.add_argument("--max-steps", type=int, default=1200)
+    parser.add_argument("--max-action-delta", type=float, default=1.0)
+    parser.add_argument("--max-speed-frac", type=float, default=0.05)
     parser.add_argument("--log-dir")
     parser.add_argument(
         "--probe", action="store_true", help="Call the model with a synthetic image; no hardware"
@@ -81,6 +83,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_llm_calls < 1 or args.max_steps < 1:
         parser.error("--max-llm-calls and --max-steps must be positive.")
+    if args.max_action_delta <= 0 or not 0 < args.max_speed_frac <= 1:
+        parser.error("--max-action-delta must be > 0 and --max-speed-frac must be in (0, 1].")
 
     wire, default_model, key_env = PROVIDERS[args.provider]
     model = args.model or default_model
@@ -98,13 +102,11 @@ def main() -> int:
 
     claude_command = None
     if args.provider == "claude":
-        claude_command = (
-            args.claude_command
-            or os.environ.get("SO101_CLAUDE_COMMAND")
-            or shutil.which("claude")
-            or str(ROOT / ".so101/claude-cli/claude_agent_sdk/_bundled/claude")
-        )
-        claude_command = str(Path(claude_command).expanduser().absolute())
+        requested_command = args.claude_command or os.environ.get("SO101_CLAUDE_COMMAND")
+        if requested_command:
+            claude_command = str(Path(requested_command).expanduser().absolute())
+        else:
+            claude_command = shutil.which("claude")
 
     if args.probe:
         command = [
@@ -150,13 +152,13 @@ def main() -> int:
             "-P",
             "images=always",
             "-P",
-            "max_speed_frac=0.05",
+            f"max_speed_frac={args.max_speed_frac}",
             "-P",
             f"max_llm_calls={args.max_llm_calls}",
             "--instruction",
             args.instruction,
             "--max-action-delta",
-            "1.0",
+            str(args.max_action_delta),
             "--max-steps",
             str(args.max_steps),
             "--epochs",
@@ -168,6 +170,8 @@ def main() -> int:
             "--store-frames",
             "--no-rerun",
             "--no-rerun-save",
+            "--fail-on-error",
+            "1",
             "--log-dir",
             log_dir,
         ]
@@ -184,8 +188,13 @@ def main() -> int:
         parser.error(f"Project Python missing: {PYTHON}")
     if key_env and not os.environ.get(key_env):
         parser.error(f"Export {key_env} before calling {args.provider}.")
-    if claude_command and not os.access(claude_command, os.X_OK):
-        parser.error(f"Claude Code executable missing: {claude_command}")
+    if args.provider == "claude":
+        if not claude_command:
+            parser.error(
+                "Claude Code CLI not found. Put claude on PATH or pass --claude-command PATH."
+            )
+        if not os.access(claude_command, os.X_OK):
+            parser.error(f"Claude Code executable missing: {claude_command}")
     if not args.probe:
         if not Path(config).is_file():
             parser.error(f"Config missing: {config}; run _run_so101.py setup first.")

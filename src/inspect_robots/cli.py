@@ -246,7 +246,7 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         "--store-frames",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="stream camera frames to the allocated <log-dir>/YYYYMMDD_runNNNN/frames "
+        help="stream camera frames to the allocated <log-dir>/YYYYMMDD-runNNN/frames "
         "instead of keeping them in memory (--no-store-frames overrides a "
         "store_frames config default)",
     )
@@ -1383,9 +1383,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
-    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get(
-        "repo_id"
-    )
+    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get("repo_id")
     revision = log.eval.policy_server.get("revision")
     if checkpoint is not None:
         identity = str(checkpoint)
@@ -2033,9 +2031,7 @@ def _cmd_inspect(
     if shared:
         _print_degraded(f"instruction: {shared}")
     print(f"policy:      {log.eval.policy}")
-    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get(
-        "repo_id"
-    )
+    checkpoint = log.eval.policy_server.get("checkpoint") or log.eval.policy_server.get("repo_id")
     revision = log.eval.policy_server.get("revision")
     if checkpoint is not None:
         identity = str(checkpoint)
@@ -2227,7 +2223,10 @@ def _directory_log_paths(log_dir: Path) -> list[Path]:
     """Discover legacy top-level logs plus logs in one run-directory layer."""
     paths = {path for path in log_dir.glob("*.json") if path.is_file()}
     for run_dir in log_dir.iterdir():
-        if not run_dir.is_dir() or re.fullmatch(r"\d{8}_run\d+", run_dir.name) is None:
+        if (
+            not run_dir.is_dir()
+            or re.fullmatch(r"\d{8}(?:-run|-RUN|_run)\d+", run_dir.name) is None
+        ):
             continue
         paths.update(path for path in run_dir.glob("*.json") if path.is_file())
     return sorted(paths)
@@ -2620,7 +2619,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
         out_path = None
     elif args.out is not None:
         out_path = Path(args.out)
-    elif re.fullmatch(r"\d{8}_run\d+", log_path.parent.name):
+    elif re.fullmatch(r"\d{8}(?:-run|-RUN|_run)\d+", log_path.parent.name):
         out_path = log_path.parent / "html" / f"{log_path.stem}.html"
     else:
         out_path = log_path.with_suffix(".html")

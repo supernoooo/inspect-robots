@@ -373,7 +373,7 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
 `PolicyError`s (`1` = first error, `0<X<1` = proportion, `X>1` = count), and
 `--store-frames` streams camera frames to a per-run subdirectory of
-`<log-dir>/YYYYMMDD_runNNNN/frames` (trial ids repeat across runs, so each run gets its own
+`<log-dir>/YYYYMMDD-runNNN/frames` (trial ids repeat across runs, so each run gets its own
 directory; the log's `stats.frames_dir` records the exact path). A
 `store_frames = true` config default enables capture on every run;
 `--no-store-frames` disables it for one invocation. When the run finishes,
@@ -505,7 +505,7 @@ inspect-robots doctor --embodiment my_arms
 Print a summary of a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog):
 
 ```bash
-inspect-robots inspect logs/20260908_run0001/cubepick-reach_xxxx.json
+inspect-robots inspect logs/20260908-run001/20260908-run001.json
 ```
 
 ```text
@@ -534,7 +534,7 @@ For runs whose policy recorded conversations (such as `--policy agent`),
 `--transcript` appends each trial's recorded transcript after the summary:
 
 ```bash
-inspect-robots inspect logs/20260908_run0001/cubepick-reach_xxxx.json --transcript
+inspect-robots inspect logs/20260908-run001/20260908-run001.json --transcript
 ```
 
 ## `inspect-robots summarize`
@@ -543,7 +543,7 @@ Distill a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) into a markdown
 learnings file:
 
 ```bash
-inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json
+inspect-robots summarize logs/20260908-run001/20260908-run001.json
 ```
 
 Without `--model`, the command works offline and writes a deterministic digest
@@ -556,7 +556,7 @@ With `--model`, the digest and the tail of each recorded policy transcript are
 sent to an OpenAI-compatible chat-completions endpoint:
 
 ```bash
-inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json \
+inspect-robots summarize logs/20260908-run001/20260908-run001.json \
   --model claude-sonnet-4-5
 ```
 
@@ -575,7 +575,7 @@ system prompt after any embodiment notes, framed as hints that may be stale
 (the current observation always wins):
 
 ```bash
-inspect-robots summarize logs/20260908_run0001/cubepick-reach_xxxx.json --model claude-sonnet-4-5
+inspect-robots summarize logs/20260908-run001/20260908-run001.json --model claude-sonnet-4-5
 inspect-robots "place the fork on the plate" --policy agent \
     -P prior_learnings=logs/learnings/cubepick-reach_xxxx.md
 ```
@@ -592,7 +592,7 @@ Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained
 report:
 
 ```bash
-inspect-robots view logs/20260908_run0001/cubepick-reach_xxxx.json
+inspect-robots view logs/20260908-run001/20260908-run001.json
 ```
 
 The report puts the run status, configuration, metrics, scene results, and
@@ -648,7 +648,7 @@ Render a `--store-frames` run's stored camera frames into one MP4 per
 (trial, camera) stream:
 
 ```bash
-inspect-robots video logs/20260908_run0001/adhoc_xxxx.json
+inspect-robots video logs/20260908-run001/20260908-run001.json
 ```
 
 ```text

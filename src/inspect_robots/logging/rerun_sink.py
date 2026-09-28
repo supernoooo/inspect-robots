@@ -192,7 +192,8 @@ class RerunSink:
 
     A recording target can be combined with either live mode when rerun-sdk
     0.24 or newer provides ``set_sinks``. ``recording_dir`` creates one file per
-    eval named ``{task_slug}_{eight_hex_digits}.rrd``; ``recording_path`` reuses
+    eval named ``{run_id}.rrd`` when bound to a run directory, otherwise
+    ``{task_slug}_{eight_hex_digits}.rrd``; ``recording_path`` reuses
     one fixed file. ``resolved_recording_path`` exposes the file attached for
     the current eval, or ``None`` when no file was attached. For a reused sink,
     the next eval's ``rr.init`` releases the previous ``FileSink`` after
@@ -672,9 +673,12 @@ class RerunSink:
             if self.recording_dir is not None:
                 recording_dir = Path(self.recording_dir)
                 recording_dir.mkdir(parents=True, exist_ok=True)
-                self.resolved_recording_path = (
-                    recording_dir / f"{_slug(spec.task)}_{uuid4().hex[:8]}.rrd"
+                basename = (
+                    spec.run_id
+                    if spec.run_id == recording_dir.name
+                    else f"{_slug(spec.task)}_{uuid4().hex[:8]}"
                 )
+                self.resolved_recording_path = recording_dir / f"{basename}.rrd"
             elif self.recording_path is not None:
                 self.resolved_recording_path = Path(self.recording_path)
 

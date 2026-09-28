@@ -1,13 +1,14 @@
 # project specific
 # _so101_instructions/
 .so101/
+.yam/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
 
-_instructions.sh
+health.jpg
 
 # C extensions
 *.so
