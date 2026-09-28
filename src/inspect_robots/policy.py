@@ -63,7 +63,7 @@ class Policy(Protocol):
     each trial's rollout. It is a policy lifecycle hook, distinct from the sink
     bus hook of the same name, which runs first and takes only scene id and epoch.
     ``log_dir`` is the already allocated per-run directory and ``run_id`` is its
-    ``YYYYMMDD_runNNNN`` basename.
+    ``YYYYMMDD-runNNN`` basename.
     ``on_trial_end(record, log_dir, run_id)`` runs when a trial finishes (including
     errored and cancelled trials, except trials whose ``on_trial_start`` raised,
     which never reached ``reset()``), before sinks see the record. Mutations to

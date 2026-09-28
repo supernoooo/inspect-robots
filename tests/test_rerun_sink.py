@@ -13,6 +13,7 @@ import threading
 import time
 import types
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -325,6 +326,23 @@ def test_recording_dir_saves_derived_fresh_path_per_eval(tmp_path: Path) -> None
         ("init", ("inspect_robots", {})),
         ("save", second),
     ]
+
+
+def test_grouped_recording_uses_the_run_name(tmp_path: Path) -> None:
+    """Grouped recordings sit beside the identically named canonical JSON."""
+    run_id = "20260928-run001"
+    run_dir = tmp_path / run_id
+    fake = _StartupRR()
+    sink = RerunSink(recording_dir=str(tmp_path))
+    sink._rr = fake
+    sink.bind_run_dir(str(run_dir), run_id)
+
+    sink.on_eval_start(replace(_eval_spec(), run_id=run_id))
+
+    expected = run_dir / f"{run_id}.rrd"
+    assert run_dir.is_dir()
+    assert sink.resolved_recording_path == expected
+    assert fake.calls[-1] == ("save", expected)
 
 
 def test_fixed_recording_path_is_exposed_as_path(tmp_path: Path) -> None:

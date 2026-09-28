@@ -29,6 +29,7 @@ from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitAppr
 from inspect_robots.controller import DefaultController
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
+from inspect_robots.log import read_eval_log
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.rollout import TrialRecord
@@ -488,6 +489,40 @@ def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> Non
     # replayed moves; the script's trailing response is not a stop).
     assert logs[0].samples[0].termination_reasons == ("done", "give_up")
     assert second["llm_usage"]["llm_calls"] == 2
+
+
+def test_grouped_run_keeps_all_agent_artifacts_together(tmp_path: Path) -> None:
+    root = tmp_path / "yam" / "claude"
+    policy = LLMAgentPolicy(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        wire="messages",
+        transport=httpx.MockTransport(_WireScript("messages")),
+        env={},
+    )
+    (log,) = ir_eval(
+        _task(max_steps=20),
+        policy,
+        _VisionAbsoluteEmbodiment(),
+        log_dir=str(root),
+        store_frames=True,
+    )
+
+    assert log.status == "success"
+    assert log.eval.run_id is not None
+    assert re.fullmatch(r"\d{8}-run001", log.eval.run_id)
+    run_dir = root / log.eval.run_id
+    saved = read_eval_log(str(run_dir / f"{log.eval.run_id}.json"))
+    assert saved.eval.run_id == log.eval.run_id
+    assert saved.stats.frames_dir == str(run_dir / "frames")
+    assert list((run_dir / "frames").glob("*.npy"))
+    metadata = saved.samples[0].trial_metadata[0]
+    for key in ("actions", "transcript", "wire_capture"):
+        pointer = metadata[key]
+        assert isinstance(pointer, str)
+        assert (run_dir / pointer).is_file()
+        assert (run_dir / pointer).resolve().is_relative_to(run_dir.resolve())
+    assert (run_dir / "wire" / "blobs").is_dir()
 
 
 @pytest.mark.parametrize("wire", ["chat", "responses", "messages"])

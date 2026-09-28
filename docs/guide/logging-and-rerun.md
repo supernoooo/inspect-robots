@@ -12,25 +12,35 @@ a structured `error`.
 from inspect_robots import eval, read_eval_log
 
 (log,) = eval("cubepick-reach", "scripted", "cubepick", log_dir="logs")
-again = read_eval_log("logs/20260908_run0001/cubepick-reach_xxxx.json")
+again = read_eval_log("logs/20260908-run001/20260908-run001.json")
 ```
 
 Logs are written atomically (temp file + rename), schema-versioned, and carry
 a read-back guarantee: a newer Inspect Robots always reads an older log.
 Each evaluation atomically claims a local-date directory named
-`YYYYMMDD_runNNNN`. Its JSON, transient live JSON, actions, frames, generated
-HTML, wire capture, and directory-configured Rerun recording stay together:
+`YYYYMMDD-runNNN`. Numbers start at `001` each local day, independently under
+each log root, and allocation is safe for concurrent runs. Existing legacy
+`YYYYMMDD_runNNNN` and uppercase `YYYYMMDD-RUNNNN` directories count toward that
+day's sequence and remain readable. New run names always use lowercase `run`.
+Its JSON, transient live JSON, actions, frames, generated HTML, transcripts,
+wire capture, and directory-configured Rerun recording stay together:
 
 ```text
-logs/20260908_run0001/
-├── <task>_<id>.json
+logs/20260908-run001/
+├── 20260908-run001.json
 ├── actions/
 ├── frames/
+├── transcripts/          # agent conversation JSONL
 ├── html/
 ├── videos/               # when run with --save-video
 ├── wire/                 # policies with wire capture
-└── <task>_<id>.rrd       # when Rerun saving is enabled
+└── 20260908-run001.rrd    # when Rerun saving is enabled
 ```
+
+While running, `20260908-run001.live.json` is a transient snapshot; the completed
+JSON replaces it as the canonical record. Task and model names remain in the JSON,
+not the filename. For per-agent YAM runs, use `--log-dir logs/yam/claude` (or `gpt`,
+`gemini`, `grok`, `claude-api`) as the root; each gets the same layout underneath.
 
 The JSON's `eval.run_id` repeats the directory name. For an HTTP-backed
 policy, `eval.policy_server` records the server URL and its health metadata;
@@ -115,9 +125,9 @@ at stake either way: scoring reads from the `FrameStore` side-car, not from
 Rerun.
 
 ```python
-RerunSink("run.rrd")                              # record one fixed file
-RerunSink(recording_dir="logs")                  # fresh task_slug_xxxxxxxx.rrd per eval
-RerunSink(spawn=True, recording_dir="logs")      # local viewer plus file
+RerunSink("run.rrd")  # record one fixed file
+RerunSink(recording_dir="logs")  # fresh task_slug_xxxxxxxx.rrd per eval
+RerunSink(spawn=True, recording_dir="logs")  # local viewer plus file
 RerunSink(spawn=True, spawn_port=9877, recording_dir="logs")
 RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy", recording_dir="logs")
 RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # live only, lossless
@@ -133,7 +143,7 @@ For `inspect-robots run`, a live viewer or `--rerun-connect` saves a `.rrd` in
 the log directory by default. Replay it later with:
 
 ```bash
-rerun logs/YYYYMMDD_runNNNN/task_slug_xxxxxxxx.rrd
+rerun logs/YYYYMMDD-runNNN/YYYYMMDD-runNNN.rrd
 ```
 
 Use `--no-rerun-save` for a live-only run, or set `rerun_save = false` under
@@ -231,7 +241,7 @@ Stored frames are raw `.npy` arrays, not a video. To watch an episode after
 the fact, render them with the [`video` subcommand](cli.md#inspect-robots-video):
 
 ```bash
-inspect-robots video logs/YYYYMMDD_runNNNN/adhoc_xxxx.json
+inspect-robots video logs/YYYYMMDD-runNNN/YYYYMMDD-runNNN.json
 ```
 
 `inspect-robots inspect` prints the frames directory and this command as a

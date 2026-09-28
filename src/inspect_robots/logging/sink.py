@@ -17,7 +17,7 @@ conformance or advertise a no-op that makes policies build transcript deltas.
 A second duck-typed extension, ``bind_run_dir(run_dir, run_id)``, is called by
 ``eval()`` exactly once per run, before the other bind hooks and
 ``on_eval_start``. Built-in file sinks use it to move directory-configured
-outputs into the atomically allocated ``YYYYMMDD_runNNNN`` directory. A callable
+outputs into the atomically allocated ``YYYYMMDD-runNNN`` directory. A callable
 with this claimed name MUST accept those two string arguments.
 
 A third duck-typed extension, ``bind_spaces(action_space, observation_space)``,

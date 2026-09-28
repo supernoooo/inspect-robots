@@ -93,23 +93,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-_RUN_DIR_RE = re.compile(r"^(?P<date>\d{8})_run(?P<number>\d+)$")
+_RUN_DIR_RE = re.compile(r"^(?P<date>\d{8})(?:-run|-RUN|_run)(?P<number>\d+)$")
 
 
 def _allocate_run_dir(log_dir: str) -> tuple[str, Path]:
-    """Atomically allocate ``YYYYMMDD_runNNNN`` below the configured log root."""
+    """Atomically allocate ``YYYYMMDD-runNNN`` below the configured log root."""
     root = Path(log_dir)
     root.mkdir(parents=True, exist_ok=True)
     date = datetime.now().astimezone().strftime("%Y%m%d")
     used = {
         int(match.group("number"))
         for path in root.iterdir()
-        if path.is_dir() and (match := _RUN_DIR_RE.fullmatch(path.name)) is not None
+        if path.is_dir()
+        and (match := _RUN_DIR_RE.fullmatch(path.name)) is not None
         and match.group("date") == date
     }
     number = max(used, default=0) + 1
     while True:
-        run_id = f"{date}_run{number:04d}"
+        run_id = f"{date}-run{number:03d}"
         run_dir = root / run_id
         try:
             run_dir.mkdir()

@@ -6,12 +6,14 @@ import importlib
 import json
 import re
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from inspect_robots import eval, read_eval_log
-from inspect_robots.cli import main
+from inspect_robots.cli import _directory_log_paths, main
 from inspect_robots.eval import _allocate_run_dir, _policy_server_metadata
+from inspect_robots.logging import JsonLogSink, LiveLogSink
 from inspect_robots.logging.rerun_sink import RerunSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
@@ -37,16 +39,78 @@ def test_eval_groups_all_builtin_artifacts_by_sequential_run(tmp_path: Path) -> 
 
     assert first.eval.run_id is not None
     assert second.eval.run_id is not None
-    assert re.fullmatch(r"\d{8}_run0001", first.eval.run_id)
-    assert second.eval.run_id == first.eval.run_id[:-4] + "0002"
+    assert re.fullmatch(r"\d{8}-run001", first.eval.run_id)
+    assert second.eval.run_id == first.eval.run_id[:-3] + "002"
     for log in (first, second):
         run_dir = tmp_path / str(log.eval.run_id)
-        assert list(run_dir.glob("*.json"))
+        log_path = run_dir / f"{log.eval.run_id}.json"
+        assert log_path.is_file()
+        saved = read_eval_log(str(log_path))
+        assert saved.eval.run_id == log.eval.run_id
+        assert saved.stats.frames_dir == str(run_dir / "frames")
+        for sample in saved.samples:
+            for metadata in sample.trial_metadata:
+                assert (run_dir / metadata["actions"]).is_file()
         assert list((run_dir / "actions").glob("*.jsonl"))
         assert list((run_dir / "frames").glob("*.npy"))
     assert not list(tmp_path.glob("*.json"))
     assert not (tmp_path / "actions").exists()
     assert not (tmp_path / "frames").exists()
+
+
+def test_live_snapshot_and_final_log_share_the_run_name(tmp_path: Path) -> None:
+    final = JsonLogSink(str(tmp_path))
+    live = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    log = eval(
+        resolve("task", "cubepick-reach"),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[final, live],
+    )[0]
+    run_dir = tmp_path / str(log.eval.run_id)
+
+    assert final.path == run_dir / f"{log.eval.run_id}.json"
+    assert final.path.is_file()
+    assert live.path == run_dir / f"{log.eval.run_id}.live.json"
+    assert not live.path.exists()
+
+
+def test_explicit_separate_file_sink_roots_keep_their_layout(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    custom = tmp_path / "custom"
+    final = JsonLogSink(str(custom))
+    live = LiveLogSink(str(custom))
+    log = eval(
+        resolve("task", "cubepick-reach"),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(root),
+        sinks=[final, live],
+    )[0]
+
+    assert final.path is not None and final.path.parent == custom
+    assert live.path is not None and live.path.parent == custom
+    assert final.path.is_file()
+    assert re.fullmatch(r"cubepick-reach_[0-9a-f]{8}\.json", final.path.name)
+    assert not live.path.exists()
+    assert not list((root / str(log.eval.run_id)).glob("*.json"))
+
+
+def test_directory_discovery_preserves_new_legacy_and_flat_logs(tmp_path: Path) -> None:
+    expected = [tmp_path / "legacy.json"]
+    for name in ("20260928-run001", "20260928-RUN002", "20260928_run0003"):
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        expected.append(run_dir / "run.json")
+    for path in expected:
+        path.touch()
+    unrelated = tmp_path / "other"
+    unrelated.mkdir()
+    (unrelated / "not-a-run.json").touch()
+    (tmp_path / "20260928-run004").touch()
+
+    assert _directory_log_paths(tmp_path) == sorted(expected)
 
 
 def test_run_directory_allocator_retries_a_concurrent_claim(
@@ -57,7 +121,7 @@ def test_run_directory_allocator_retries_a_concurrent_claim(
 
     def mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
         nonlocal raced
-        if path.parent == tmp_path and path.name.endswith("_run0001") and not raced:
+        if path.parent == tmp_path and path.name.endswith("-run001") and not raced:
             raced = True
             real_mkdir(path, *args, **kwargs)
             raise FileExistsError(path)
@@ -67,8 +131,43 @@ def test_run_directory_allocator_retries_a_concurrent_claim(
     run_id, run_dir = _allocate_run_dir(str(tmp_path))
 
     assert raced
-    assert run_id.endswith("_run0002")
+    assert run_id.endswith("-run002")
     assert run_dir.is_dir()
+
+
+def test_run_allocator_preserves_legacy_sequences_and_skips_file_collisions(
+    tmp_path: Path,
+) -> None:
+    date = datetime.now().astimezone().strftime("%Y%m%d")
+    (tmp_path / f"{date}_run0007").mkdir()
+    (tmp_path / f"{date}-RUN008").mkdir()
+    (tmp_path / f"{date}-run009").touch()
+    (tmp_path / "unrelated").mkdir()
+
+    run_id, run_dir = _allocate_run_dir(str(tmp_path))
+
+    assert run_id == f"{date}-run010"
+    assert run_dir.is_dir()
+
+
+def test_run_numbers_are_per_agent_and_reset_each_day(tmp_path: Path, monkeypatch: Any) -> None:
+    current = [datetime(2026, 9, 28, 12)]
+
+    class Clock:
+        @staticmethod
+        def now() -> datetime:
+            return current[0]
+
+    eval_module = importlib.import_module("inspect_robots.eval")
+    monkeypatch.setattr(eval_module, "datetime", Clock)
+    claude = str(tmp_path / "yam" / "claude")
+    gpt = str(tmp_path / "yam" / "gpt")
+
+    assert _allocate_run_dir(claude)[0] == "20260928-run001"
+    assert _allocate_run_dir(claude)[0] == "20260928-run002"
+    assert _allocate_run_dir(gpt)[0] == "20260928-run001"
+    current[0] = datetime(2026, 9, 29, 12)
+    assert _allocate_run_dir(claude)[0] == "20260929-run001"
 
 
 def test_policy_server_metadata_is_best_effort(monkeypatch: Any) -> None:
@@ -210,9 +309,7 @@ def test_view_places_nested_report_in_the_run_directory(tmp_path: Path) -> None:
     assert f"../{run_dir.name}/html/{report.name}" in index.read_text(encoding="utf-8")
 
 
-def test_cli_prints_server_checkpoint_identity(
-    tmp_path: Path, capsys: Any
-) -> None:
+def test_cli_prints_server_checkpoint_identity(tmp_path: Path, capsys: Any) -> None:
     log = eval(
         resolve("task", "cubepick-reach"),
         ScriptedPolicy(),

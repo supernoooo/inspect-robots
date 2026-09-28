@@ -147,7 +147,12 @@ class LiveLogSink:
             self._errored_trials = 0
             self._latencies = []
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            self.path = self.log_dir / f"{_slug(spec.task)}_{uuid.uuid4().hex[:8]}.live.json"
+            basename = (
+                spec.run_id
+                if spec.run_id == self.log_dir.name
+                else f"{_slug(spec.task)}_{uuid.uuid4().hex[:8]}"
+            )
+            self.path = self.log_dir / f"{basename}.live.json"
             now = self._clock()
             self._started_clock = now
             self._last_write_clock = None

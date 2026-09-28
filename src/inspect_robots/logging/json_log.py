@@ -99,7 +99,12 @@ class JsonLogSink:
     def on_eval_end(self, log: EvalLog) -> None:
         """Atomically serialize the final log and expose its path."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
+        basename = (
+            log.eval.run_id
+            if log.eval.run_id == self.log_dir.name
+            else f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}"
+        )
+        filename = f"{basename}.json"
         self.path = self.log_dir / filename
         tmp = self.path.with_suffix(".json.tmp")
         with tmp.open("w", encoding="utf-8") as fh:
