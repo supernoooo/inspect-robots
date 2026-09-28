@@ -92,6 +92,53 @@ endpoint support:
 | `messages` (`anthropic` alias) | `/messages` | Anthropic, Tinker, or a compatible Messages endpoint |
 | `gemini-live` | `BidiGenerateContent` (WSS) | Google's Live API: required for the `-streaming-` robotics model ids |
 | `interactions` | `/interactions` | Google's stateful HTTP API: server-side history for GA Gemini models, e.g. `gemini-3.7-flash` |
+| `claude-code` | Official `claude -p` CLI | Personal Claude Code login on this machine; keeps the existing Inspect Robots eval loop |
+
+## Personal Claude Code login (local backend)
+
+Use the unmodified official Claude Code CLI with your own account:
+
+```bash
+claude auth login
+claude auth status
+inspect-robots "observe the cube, then give up" --embodiment cubepick --policy agent \
+    -P wire=claude-code -P model=sonnet
+```
+
+If `claude` is not on `PATH`, pass `-P claude_command=/absolute/path/to/claude`.
+`-P claude_timeout_s=120` bounds each CLI decision. Use a current CLI with
+`auth status`, image input in `stream-json`, and `--json-schema`; local validation
+used Claude Code 2.1.283. No additional Python dependency is required by this
+adapter. Login and token refresh are handled by the CLI, not by this plugin.
+
+Camera frames and labeled state are sent to the CLI. A schema restricts its
+structured output to one of the existing robot tools. The normal toolset,
+controller, approvers, operator feedback, scoring, transcript, and usage logging
+then handle that proposal. Each decision gets canonical per-trial history in a
+fresh CLI session; this adds process startup overhead and counts a decision
+rather than each internal CLI turn toward `max_llm_calls` (CLI turns are capped
+at three per decision).
+
+The child process excludes API/Console credentials and provider-selection
+variables, and checks for a subscription login before evaluation. CLI built-in
+tools, external MCP servers, hooks, skills and session persistence are disabled.
+`base_url`, `api_key_env`, `temperature`, and `max_output_tokens` are unsupported
+on this backend; effort can be `low`, `medium`, `high`, or `max`. Do not use CLI
+bare mode for subscription authentication.
+
+GPT evaluation continues to use `OPENAI_API_KEY` and the existing API backends:
+
+```bash
+inspect-robots "observe the cube, then give up" --embodiment cubepick --policy agent \
+    -P wire=responses -P model=openai/YOUR_VISION_MODEL
+```
+
+The terminal environment is unchanged, so switching between Claude login and
+GPT API evaluation does not require removing or replacing the GPT key. Personal
+subscription usage remains subject to the account's limits. See the official
+[CLI documentation](https://code.claude.com/docs/en/headless),
+[authentication documentation](https://code.claude.com/docs/en/authentication),
+and [Agent SDK plan update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
 
 ## How it works
 

@@ -1,3 +1,7 @@
+# project specific
+_so101_instructions/
+.so101/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

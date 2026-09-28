@@ -37,6 +37,7 @@ from inspect_robots.types import ActionChunk, Observation
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
+from inspect_robots_agent._claude_code import ClaudeCodeClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._gemini_live import GeminiLiveClient
 from inspect_robots_agent._interactions import InteractionsClient
@@ -91,7 +92,9 @@ _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh",
 # offers. The range is half-open by construction: 1.0 means "past max effort",
 # and servers that cap lower reject it with a guided 4xx.
 _EFFORT_FRACTION_LIMIT = 1.0
-_WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live", "interactions"})
+_WIRE_FORMATS = frozenset(
+    {"chat", "responses", "messages", "gemini-live", "interactions", "claude-code"}
+)
 _WIRE_ALIASES = {"anthropic": "messages"}
 _AGENT_NATIVE_WIRES = frozenset({"chat", "messages"})
 _MESSAGES_CAPABLE_PREFIXES = frozenset(
@@ -270,6 +273,8 @@ class AgentPolicyConfig(PolicyConfig):
     #: Canonical wire name; constructor input ``anthropic`` aliases ``messages``.
     wire: str = "chat"
     wire_capture: bool = True
+    claude_command: str | None = None
+    claude_timeout_s: float | None = None
     speed: str | None = None
     #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
@@ -325,6 +330,8 @@ class LLMAgentPolicy(PolicyBase):
         api_key_env: str | None = None,
         wire: str | _Unset = _UNSET,
         wire_capture: bool = True,
+        claude_command: str | None = None,
+        claude_timeout_s: float = 120.0,
         speed: str | None = None,
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
@@ -418,7 +425,7 @@ class LLMAgentPolicy(PolicyBase):
         requested_model = model or environ.get(ENV_MODEL)
         direct_claim = (
             _direct_claim(requested_model, environ, native_wires=_AGENT_NATIVE_WIRES)
-            if not base_url
+            if not base_url and wire != "claude-code"
             else None
         )
         # Order matters from here down (plan 0026): wire is validated before
@@ -436,6 +443,18 @@ class LLMAgentPolicy(PolicyBase):
         resolved_effort: str | float | None = None
         if not isinstance(effort, _Unset):
             resolved_effort = _validated_effort("none" if effort is None else effort)
+        if wire == "claude-code":
+            if base_url is not None or api_key_env is not None or transport is not None:
+                raise ConfigError(
+                    "wire='claude-code' uses the official CLI login, not an API endpoint.\n"
+                    "fix: drop base_url, api_key_env, and transport"
+                )
+            if temperature is not None:
+                raise ConfigError("temperature is not supported on wire='claude-code'")
+            if resolved_effort not in {None, "low", "medium", "high", "max"}:
+                raise ConfigError("effort on wire='claude-code' must be low, medium, high, or max")
+        elif claude_command is not None or claude_timeout_s != 120.0:
+            raise ConfigError("claude_command/claude_timeout_s require -P wire=claude-code")
         if wire == "gemini-live" and effort is not _UNSET:
             raise ConfigError(
                 "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
@@ -547,13 +566,21 @@ class LLMAgentPolicy(PolicyBase):
         if wire == "interactions" and base_url and not api_key_env:
             effective_key_env = "GEMINI_API_KEY"
         try:
-            provider = resolve_provider(
-                model=requested_model,
-                base_url=base_url,
-                api_key_env=effective_key_env,
-                env=environ,
-                native_wires=_AGENT_NATIVE_WIRES,
-            )
+            if wire == "claude-code":
+                cli_model = requested_model or "sonnet"
+                if cli_model.startswith("anthropic/"):
+                    cli_model = cli_model.removeprefix("anthropic/")
+                if not cli_model:
+                    raise ConfigError("Claude Code model must be a model alias or full model ID")
+                provider = Provider(base_url="claude-code://local", api_key="", model=cli_model)
+            else:
+                provider = resolve_provider(
+                    model=requested_model,
+                    base_url=base_url,
+                    api_key_env=effective_key_env,
+                    env=environ,
+                    native_wires=_AGENT_NATIVE_WIRES,
+                )
         except ConfigError as exc:
             if wire not in {"gemini-live", "interactions"} or base_url:
                 raise
@@ -683,9 +710,22 @@ class LLMAgentPolicy(PolicyBase):
         )
         self._capture = WireCapture() if wire_capture else None
         self._client: (
-            ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient | InteractionsClient
+            ChatClient
+            | ResponsesClient
+            | AnthropicClient
+            | GeminiLiveClient
+            | InteractionsClient
+            | ClaudeCodeClient
         )
-        if wire == "messages":
+        if wire == "claude-code":
+            self._client = ClaudeCodeClient(
+                provider.model,
+                command=claude_command,
+                timeout_s=claude_timeout_s,
+                env=environ,
+                capture=self._capture,
+            )
+        elif wire == "messages":
             assert resolved_max_output_tokens is not None
             self._client = AnthropicClient(
                 provider,
@@ -723,6 +763,10 @@ class LLMAgentPolicy(PolicyBase):
             api_key_env=api_key_env,
             wire=wire,
             wire_capture=wire_capture,
+            claude_command=(
+                self._client.command if isinstance(self._client, ClaudeCodeClient) else None
+            ),
+            claude_timeout_s=claude_timeout_s if wire == "claude-code" else None,
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
