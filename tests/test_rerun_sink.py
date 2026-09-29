@@ -1967,3 +1967,30 @@ def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     assert completed.returncode == 0, completed.stderr
     # Guard against the trivial pass: the wedge branch must actually fire.
     assert "viewer connection is stalled" in completed.stderr, completed.stderr
+
+
+def test_reset_observation_displays_images_and_state_without_a_fake_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch, image_cls=_RawImage)
+    sink = RerunSink(jpeg_quality=None)
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("initial", 0)
+    observation = _obs()
+    sink.log_observation(0, observation)
+    observation.images["cam"][:] = 255
+    observation.state["q"][:] = 99
+    assert sink.flush(timeout=5.0)
+
+    paths = [path for path, value in logged]
+    assert "trial/initial/e0/camera/cam" in paths
+    assert "trial/initial/e0/state/q/0" in paths
+    assert not any("/action/" in path or path.endswith("/reward") for path in paths)
+    camera = next(value for path, value in logged if path.endswith("/camera/cam"))
+    assert isinstance(camera, _RawImage)
+    np.testing.assert_array_equal(camera.img, np.zeros((4, 4, 3), dtype=np.uint8))
+    assert next(value for path, value in logged if path.endswith("/state/q/0")) == ("Scalars", 1.0)
+
+    _log_one(sink)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+    assert any(path == "trial/initial/e0/action/0" for path, _value in logged)

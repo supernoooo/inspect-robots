@@ -243,6 +243,18 @@ class _Broadcast:
         self._policy_message_hooks = policy_message_hooks
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
+        observation_hooks: list[Callable[[int, Observation], None]] = []
+        for sink in sinks:
+            hook = getattr(sink, "log_observation", None)
+            if callable(hook):
+                observation_hooks.append(hook)
+        self._observation_hooks = observation_hooks
+        if observation_hooks:
+            self.log_observation = self._fan_observation
+
+    def _fan_observation(self, t: int, observation: Observation) -> None:
+        for hook in self._observation_hooks:
+            hook(t, observation)
 
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         for hook in self._policy_message_hooks:

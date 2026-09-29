@@ -32,6 +32,13 @@ A fourth duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
 or ``None`` when frame storage is off. A callable with this claimed name MUST
 accept that one-argument signature. It deliberately remains off ``LogSink`` and
 ``NullSink`` like the other optional extensions.
+
+The optional ``log_observation(t, observation)`` extension receives the reset
+observation once, at step zero, before the first policy inference. It lets live
+viewers display the starting scene while the policy is thinking. This is not a
+completed transition and must not invent an action or increase the step count.
+Sinks must not mutate the observation. Like the other extensions, it remains
+off ``LogSink`` and ``NullSink``; hook failures warn without aborting the trial.
 """
 
 from __future__ import annotations
