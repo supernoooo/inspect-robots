@@ -1499,7 +1499,13 @@ def _render_config(
         # an existing config passes free-text validation and survives Enter.
         value = defaults[key].replace("\n", "\n\t")
         line = f"{key} = {value}"
-        if comment := _DEFAULT_COMMENTS.get(key):
+        comment = _DEFAULT_COMMENTS.get(key)
+        if defaults.get("embodiment") != "yam_arms":
+            if key == "policy":
+                comment = "registered policy"
+            elif key == "embodiment":
+                comment = "registered embodiment; devices configured below"
+        if comment:
             line = f"{line:<26}# {comment}" if len(line) < 26 else f"{line}  # {comment}"
         default_lines.append(line)
     for key, value in carried.get("defaults", {}).items():

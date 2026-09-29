@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspect-robots-so101-configured"
+version = "0.1.0"
+description = "SO-101 rig configuration using the official robocurve plugin"
+requires-python = ">=3.12"
+dependencies = [
+  "inspect-robots>=0.58",
+  "inspect-robots-so101[lerobot] @ git+https://github.com/robocurve/inspect-robots-so101@096d89e12a9e31228fa57a7e5b7d236b09f3db6e",
+  "pyrealsense2==2.58.4.10922",
+]
+
+[project.entry-points."inspect_robots.embodiments"]
+so101_configured = "_run_so101:configured_so101"
+
+[tool.setuptools]
+py-modules = ["_run_so101", "_so101_motion"]

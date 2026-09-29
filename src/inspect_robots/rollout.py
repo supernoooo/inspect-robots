@@ -321,6 +321,17 @@ def rollout(
                 )
 
         obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
+        observation_hook = getattr(sink, "log_observation", None)
+        if callable(observation_hook):
+            try:
+                observation_hook(0, obs)
+            except Exception as exc:
+                warnings.warn(
+                    "Initial observation logging failed after "
+                    f"{type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         t = 0
         while t < max_steps:
             poll = None

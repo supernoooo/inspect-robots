@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
 import shlex
 import shutil
@@ -12,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PYTHON = ROOT / ".venv/bin/python"
+CLI = ROOT / ".venv/bin/inspect-robots"
 PROVIDERS = {
     "claude": ("claude-code", "claude-opus-5-5", None),
     "gpt": ("responses", "openai/gpt-6-astra", "OPENAI_API_KEY"),
@@ -28,7 +27,7 @@ BOTTLE_INSTRUCTION = (
 
 
 def check_arm_settings(parser: argparse.ArgumentParser) -> None:
-    """Require existing calibration and explicit native-unit action bounds."""
+    """Require existing motor calibration before launching evaluation."""
     calibration_dir = Path(os.environ["SO101_CALIBRATION_DIR"]).expanduser()
     calibration_file = calibration_dir / f"{os.environ['SO101_ROBOT_ID']}.json"
     if not calibration_file.is_file():
@@ -37,32 +36,10 @@ def check_arm_settings(parser: argparse.ArgumentParser) -> None:
             "Set SO101_CALIBRATION_DIR and SO101_ROBOT_ID to your existing calibration, "
             "or follow the lerobot-calibrate instructions first."
         )
-    bounds = []
-    for variable in ("SO101_JOINT_LOW", "SO101_JOINT_HIGH"):
-        try:
-            values = json.loads(os.environ[variable])
-        except (KeyError, ValueError):
-            parser.error(f"Set {variable} to a JSON array of six calibrated joint limits.")
-        if (
-            not isinstance(values, list)
-            or len(values) != 6
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                for value in values
-            )
-        ):
-            parser.error(f"{variable} must be a JSON array of six finite numbers.")
-        bounds.append(values)
-    if any(low >= high for low, high in zip(*bounds, strict=True)):
-        parser.error("Every SO101_JOINT_LOW value must be below its SO101_JOINT_HIGH value.")
-    if not 0 <= bounds[0][5] < bounds[1][5] <= 100:
-        parser.error("The gripper limits (sixth values) must be within 0..100.")
 
 
 def main() -> int:
-    """Build the existing CLI command; only explicit invocation starts a run."""
+    """Build the inspect-robots CLI command; only explicit invocation starts a run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider", choices=tuple(PROVIDERS))
     parser.add_argument("--model", help="Exact model ID; overrides the provider default")
@@ -71,7 +48,7 @@ def main() -> int:
     parser.add_argument("--instruction", default=BOTTLE_INSTRUCTION)
     parser.add_argument("--max-llm-calls", type=int, default=60)
     parser.add_argument("--max-steps", type=int, default=1200)
-    parser.add_argument("--max-action-delta", type=float, default=1.0)
+    parser.add_argument("--max-action-delta", type=float, help="Optional override of the CLI per-step limit")
     parser.add_argument("--max-speed-frac", type=float, default=0.05)
     parser.add_argument("--log-dir")
     parser.add_argument(
@@ -83,7 +60,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_llm_calls < 1 or args.max_steps < 1:
         parser.error("--max-llm-calls and --max-steps must be positive.")
-    if args.max_action_delta <= 0 or not 0 < args.max_speed_frac <= 1:
+    if ((args.max_action_delta is not None and args.max_action_delta <= 0)
+            or not 0 < args.max_speed_frac <= 1):
         parser.error("--max-action-delta must be > 0 and --max-speed-frac must be in (0, 1].")
 
     wire, default_model, key_env = PROVIDERS[args.provider]
@@ -127,11 +105,9 @@ def main() -> int:
             .expanduser()
             .absolute()
         )
-        model_dir = model.replace("/", "_")
-        log_dir = args.log_dir or f"logs/so101/{args.provider}/{model_dir}/bottle"
+        log_dir = args.log_dir or f"logs/so101/{args.provider}"
         command = [
-            str(PYTHON),
-            str(ROOT / "_so101_instructions/_run_so101.py"),
+            str(CLI),
             "run",
             "--config",
             config,
@@ -157,8 +133,6 @@ def main() -> int:
             f"max_llm_calls={args.max_llm_calls}",
             "--instruction",
             args.instruction,
-            "--max-action-delta",
-            str(args.max_action_delta),
             "--max-steps",
             str(args.max_steps),
             "--epochs",
@@ -175,9 +149,8 @@ def main() -> int:
             "--log-dir",
             log_dir,
         ]
-        for name in ("joint_low", "joint_high"):
-            if value := os.environ.get(f"SO101_{name.upper()}"):
-                command += ["-E", f"{name}={value}"]
+        if args.max_action_delta is not None:
+            command += ["--max-action-delta", str(args.max_action_delta)]
         if claude_command:
             command += ["-P", f"claude_command={claude_command}"]
 
@@ -197,12 +170,12 @@ def main() -> int:
             parser.error(f"Claude Code executable missing: {claude_command}")
     if not args.probe:
         if not Path(config).is_file():
-            parser.error(f"Config missing: {config}; run _run_so101.py setup first.")
+            parser.error(f"Config missing: {config}; use the SO-101 deployment config from _instructions.sh.")
         os.environ["SO101_ROBOT_ID"] = robot_id
         os.environ["SO101_CALIBRATION_DIR"] = calibration_dir
         check_arm_settings(parser)
     os.chdir(ROOT)
-    os.execv(str(PYTHON), command)
+    os.execv(command[0], command)
     return 0
 
 

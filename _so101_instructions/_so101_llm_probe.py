@@ -14,7 +14,7 @@ from inspect_robots import Observation, Scene
 
 
 def main() -> int:
-    """Use a synthetic front image and joint state; never reset/step the arm."""
+    """Use synthetic camera images and joint state; never reset/step the arm."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--wire", choices=("claude-code", "responses", "chat", "interactions"), required=True
@@ -41,7 +41,7 @@ def main() -> int:
                 id="synthetic-login-probe",
                 instruction=(
                     "This is a synthetic connection probe. "
-                    "The front image is gray with a blue square. "
+                    "Each camera image is gray with a blue square. "
                     "Observe the image and joints, then call give_up. In its reason, describe the "
                     "square's color. Do not request movement. No robot is connected."
                 ),
@@ -51,7 +51,7 @@ def main() -> int:
         frame[160:320, 240:400] = (0, 0, 255)
         observation = Observation(
             state={"joint_pos": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 50.0])},
-            images={"front": frame},
+            images={camera.name: frame.copy() for camera in arm.info.observation_space.cameras},
         )
         chunk = policy.act(observation)
         last = chunk.actions[-1]

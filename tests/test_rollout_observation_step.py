@@ -640,3 +640,58 @@ def test_end_trial_runs_on_keyboard_interrupt_cancelled_trial_path() -> None:
     assert excinfo.value.__cause__ is original
     assert excinfo.value.record.status == "cancelled"
     assert operator_input.end_calls == 1
+
+
+def test_initial_observation_is_broadcast_before_first_policy_call() -> None:
+    from inspect_robots.eval import _Broadcast
+
+    order: list[str] = []
+
+    class LiveSink(NullSink):
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.initial: list[tuple[int, Observation]] = []
+
+        def log_observation(self, t: int, observation: Observation) -> None:
+            order.append(self.name)
+            self.initial.append((t, observation))
+
+    class Policy(_ProbePolicy):
+        def act(self, observation: Observation) -> ActionChunk:
+            order.append("policy")
+            assert order[:2] == ["first", "second"]
+            return super().act(observation)
+
+    first, second = LiveSink("first"), LiveSink("second")
+    step_sink = _ObservationSink()
+    record = _run(
+        Policy(), CubePickEmbodiment(), max_steps=2,
+        sink=_Broadcast([first, NullSink(), second, step_sink]),
+    )
+
+    assert len(first.initial) == len(second.initial) == 1
+    assert first.initial[0][0] == 0
+    assert first.initial[0][1] is second.initial[0][1]
+    assert first.initial[0][1] is step_sink.observations[0]
+    assert len(record.steps) == len(step_sink.observations) == 2
+    assert order == ["first", "second", "policy", "policy"]
+
+
+def test_failed_initial_observation_hook_keeps_trial_running() -> None:
+    class FailedSink(NullSink):
+        def log_observation(self, t: int, observation: Observation) -> None:
+            raise RuntimeError("viewer unavailable")
+
+    with pytest.warns(
+        RuntimeWarning, match="Initial observation logging failed.*viewer unavailable"
+    ):
+        record = _run(_ProbePolicy(), CubePickEmbodiment(), max_steps=2, sink=FailedSink())
+    assert len(record.steps) == 2
+    assert record.status == "success"
+
+
+def test_sinks_without_initial_observation_do_not_advertise_the_hook() -> None:
+    from inspect_robots.eval import _Broadcast
+
+    assert not callable(getattr(NullSink(), "log_observation", None))
+    assert not callable(getattr(_Broadcast([NullSink()]), "log_observation", None))

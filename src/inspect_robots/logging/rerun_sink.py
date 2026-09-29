@@ -157,13 +157,13 @@ def _camera_order(names: tuple[str, ...]) -> list[str]:
 
 @dataclasses.dataclass(frozen=True)
 class _StepPayload:
-    """One transition, snapshotted so no live buffers are shared across threads."""
+    """An observation or transition, with no live buffers shared across threads."""
 
     prefix: str
     t: int
     images: dict[str, ImageArray]
     state: dict[str, npt.NDArray[np.float64]]
-    action: npt.NDArray[np.float64]
+    action: npt.NDArray[np.float64] | None
     reward: float | None
     terminated: bool
     termination_reason: str | None
@@ -458,8 +458,9 @@ class RerunSink:
         for key, vec in payload.state.items():
             for i, scalar in enumerate(vec):
                 rr.log(f"{pre}/state/{key}/{i}", self._scalar(rr, float(scalar)))
-        for i, scalar in enumerate(payload.action):
-            rr.log(f"{pre}/action/{i}", self._scalar(rr, float(scalar)))
+        if payload.action is not None:
+            for i, scalar in enumerate(payload.action):
+                rr.log(f"{pre}/action/{i}", self._scalar(rr, float(scalar)))
         if payload.reward is not None:
             rr.log(f"{pre}/reward", self._scalar(rr, payload.reward))
         if payload.terminated:
@@ -740,6 +741,26 @@ class RerunSink:
         """Select the entity namespace for the incoming scene and epoch."""
         # Namespace this trial's entities so trials never overwrite each other.
         self._prefix = f"trial/{scene_id}/e{epoch}"
+
+    def log_observation(self, t: int, observation: Observation) -> None:
+        """Publish the reset observation before the first policy inference finishes."""
+        if self._ensure_rerun() is None:
+            return
+        payload = _StepPayload(
+            prefix=self._prefix,
+            t=t,
+            images={cam: np.array(img) for cam, img in observation.images.items()},
+            state={
+                key: np.atleast_1d(np.array(value, dtype=np.float64))
+                for key, value in observation.state.items()
+            },
+            action=None,
+            reward=None,
+            terminated=False,
+            termination_reason=None,
+        )
+        self._ensure_worker()
+        self._enqueue(payload)
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
