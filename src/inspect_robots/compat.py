@@ -246,5 +246,12 @@ def assert_compatible(
     """Check compatibility and raise
     [`CompatibilityError`][inspect_robots.errors.CompatibilityError] on hard errors."""
     report = check_compatibility(policy, embodiment, task, remap=remap)
+    # Policies with a narrower physical wire protocol can reject mismatches
+    # (bounds, camera dimensions, gripper encoding) omitted by the core check.
+    preflight = getattr(policy, "pairing_preflight", None)
+    if callable(preflight):
+        extra = preflight(embodiment)
+        if extra is not None:
+            report.issues.extend(extra.issues)
     report.raise_for_errors()
     return report

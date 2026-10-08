@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-jev-vision-service"
+version = "0.1.0"
+description = "Isolated Grounding DINO tiny and SAM 2.1 tiny RGB vision server."
+requires-python = ">=3.10"
+dependencies = [
+    "inspect-robots-jev>=0.1.0",
+    "numpy>=1.24",
+    "pillow>=10",
+    "torch>=2.2",
+    "transformers>=4.51,<5",
+    "huggingface-hub>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+inspect-robots-jev-vision = "inspect_robots_jev_vision.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_jev_vision"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_jev_vision", "tests", "README.md"]

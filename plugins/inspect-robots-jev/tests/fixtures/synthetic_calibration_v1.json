@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "calibration_id": "synthetic-v1",
+  "units": "metres+radians",
+  "base_frame": "base: x_forward,y_left,z_up; metres",
+  "optical_frame": "optical: x_right,y_down,z_forward; metres",
+  "cameras": {
+    "top_cam": {
+      "width": 101, "height": 101, "fx": 100, "fy": 100, "cx": 50, "cy": 50,
+      "parent": "base",
+      "transform": {"translation_m": [0, 0, 1], "rotation_wxyz": [0, 1, 0, 0]}
+    },
+    "left_cam": {
+      "width": 101, "height": 101, "fx": 100, "fy": 100, "cx": 50, "cy": 50,
+      "parent": "left_eef",
+      "transform": {"translation_m": [0, 0, 0.5], "rotation_wxyz": [0, 1, 0, 0]}
+    },
+    "right_cam": {
+      "width": 101, "height": 101, "fx": 100, "fy": 100, "cx": 50, "cy": 50,
+      "parent": "right_eef",
+      "transform": {"translation_m": [0, 0, 0.5], "rotation_wxyz": [0, 1, 0, 0]}
+    }
+  },
+  "table_plane": {"normal_base": [0, 0, 1], "offset_m": 0},
+  "box_opening": {
+    "size_m": [0.2, 0.16], "rim_height_m": 0.1,
+    "clearance_m": 0.04, "lateral_margin_m": 0.05
+  }
+}

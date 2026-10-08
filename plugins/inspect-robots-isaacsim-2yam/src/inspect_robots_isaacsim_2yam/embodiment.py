@@ -8,6 +8,7 @@ environment; only :meth:`IsaacSim2YamEmbodiment.reset` launches the simulator.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -237,7 +238,16 @@ class IsaacSim2YamEmbodiment:
                     images[camera] = _to_image(group[camera])
             if "joint_pos" in group:
                 state["joint_pos"] = _to_float_array(group["joint_pos"])
-        return Observation(images=images, state=state, instruction=instruction)
+        # This records assembly time, not the physical exposure time. The policy
+        # compares these timestamps with time.monotonic() on this same process.
+        assembled_at = time.monotonic()
+        return Observation(
+            images=images,
+            state=state,
+            instruction=instruction,
+            image_times={camera: assembled_at for camera in images},
+            state_time=assembled_at if "joint_pos" in state else 0.0,
+        )
 
 
 def _np(value: Any) -> npt.NDArray[Any]:

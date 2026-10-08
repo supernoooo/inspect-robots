@@ -140,6 +140,60 @@ subscription usage remains subject to the account's limits. See the official
 [authentication documentation](https://code.claude.com/docs/en/authentication),
 and [Agent SDK plan update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
 
+## Structured joint proposals (Responses only)
+
+`AgentProposer` is a separate interface for a 14-joint, three-camera
+absolute-joint embodiment. It requests one `propose_actions`, `done`, or
+`give_up` tool call. It never sends a robot action. The caller validates
+each candidate and decides whether to execute one or hold.
+
+```python
+from inspect_robots_agent import (
+    AgentProposer, ProposalBatch, ProposalFailure, ProposalFeedback,
+    ProposalTermination,
+)
+
+proposer = AgentProposer(
+    model="openai/gpt-6-astra",
+    action_space=embodiment.info.action_space,
+    observation_space=embodiment.info.observation_space,
+    embodiment_docs=embodiment.info.docs,
+    max_llm_calls=100,
+    candidate_count=3,  # requested count; any valid batch may contain 2–4
+)
+result = proposer.propose("put the cube in the tray", observation)
+if isinstance(result, ProposalBatch):
+    # The batch has per-camera normalized 2-D estimates. Each candidate also
+    # names its acting arm, predicted per-camera du/dv and verifiable result.
+    # preferred_id is advice, not authorization to execute.
+    chosen_id = select_and_validate(result)  # caller-defined; may return None
+    next_observation = observe_after_choice(chosen_id)  # caller-defined
+    next_result = proposer.propose(
+        "put the cube in the tray", next_observation,
+        feedback=ProposalFeedback(chosen_id, "caller-measured outcome"),
+    )
+elif isinstance(result, ProposalTermination):
+    finish_trial(result.status, result.summary)  # done or give_up
+elif isinstance(result, ProposalFailure):
+    hold_position(result.code)
+```
+
+`ProposalBatch`, `ProposalTermination`, and `ProposalFailure` record the model,
+response duration, token usage, and raw Responses payload (if one arrived).
+`ProposalFailure.code` identifies the failure. A batch and its candidates have
+only `proposed` status; there is no execution result or tool-success message.
+Each request encodes the newly supplied observation and, when provided, only
+the caller's previous selection and report. Earlier camera frames and joint
+state are not replayed. `records` retains results for audit. The budget counts
+each request, including failures; `budget_exhausted` does not contact the model.
+Call `reset()` between trials to clear the budget and audit log, and `close()`
+when the proposer is no longer needed.
+
+All 2-D points and predicted displacements are labeled `agent_unverified`.
+Visible points require finite normalized `u/v` in `[0, 1]`; invisible points
+must use null coordinates. Old saved batches without these fields remain
+readable and expose them as unknown.
+
 ## How it works
 
 Motion tool calls state where to go, not how long to move. For absolute modes,

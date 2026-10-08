@@ -23,12 +23,16 @@ from inspect_robots_isaacsim_2yam import embodiment as module
 from inspect_robots_isaacsim_2yam.asset import prepare_isaac_mjcf
 from inspect_robots_isaacsim_2yam.contract import (
     ACTION_DIM,
+    CAMERA_NAMES,
     DIM_LABELS,
     action_space,
     observation_space,
     physical_joint_targets,
     wire_state,
 )
+from inspect_robots_yam.config import YamConfig, action_box as yam_action_box
+from inspect_robots_yam.config import observation_space as yam_observation_space
+from inspect_robots_yam.packing import DIM_LABELS as YAM_DIM_LABELS
 
 
 class _MatchingPolicy:
@@ -127,6 +131,14 @@ def test_contract_matches_molmoact2_yam() -> None:
     obs_space = observation_space(12, 16)
     assert obs_space.camera_names == frozenset({"top_cam", "left_cam", "right_cam"})
     assert obs_space.state_keys == frozenset({"joint_pos"})
+    # Fail if the simulation profile drifts from the installed real YAM wire.
+    cfg = YamConfig()
+    real = yam_action_box(cfg.low, cfg.high)
+    assert DIM_LABELS == YAM_DIM_LABELS == real.semantics.dim_labels
+    assert space.semantics == real.semantics
+    np.testing.assert_array_equal(space.low, real.low)
+    np.testing.assert_array_equal(space.high, real.high)
+    assert obs_space == yam_observation_space(12, 16, CAMERA_NAMES)
 
 
 def test_physical_action_and_wire_state_round_trip() -> None:
@@ -309,6 +321,20 @@ def test_reset_and_step_translation() -> None:
     env.next_truncated = True
     result = embodiment.step(Action(data=np.zeros(14)))
     assert result.truncated
+
+
+def test_reset_and_step_stamp_all_assembled_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stamps = iter([100.0, 101.0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(stamps))
+    embodiment = IsaacSim2YamEmbodiment()
+    _inject(embodiment)
+    first = embodiment.reset(Scene(id="s", instruction="move"))
+    second = embodiment.step(Action(data=np.zeros(14))).observation
+    for observed, stamp in ((first, 100.0), (second, 101.0)):
+        assert observed.image_times == {camera: stamp for camera in CAMERA_NAMES}
+        assert observed.state_time == stamp
 
 
 @pytest.mark.parametrize("action", [np.zeros(13), np.full(14, np.inf)])

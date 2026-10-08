@@ -32,7 +32,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 # Core depends ONLY on numpy + the standard library. Everything else is an extra.
-dependencies = ["numpy>=1.24"]
+dependencies = [
+    "numpy>=1.24",
+    "typesafe-sdk>=0.7.0",
+]
 
 [project.optional-dependencies]
 rerun = ["rerun-sdk>=0.20", "pillow>=10"]

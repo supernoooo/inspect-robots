@@ -53,6 +53,21 @@ class ResponsesClient:
         reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         """Return one assistant turn for the translated chat-format history."""
+        payload = self.complete_raw(messages, tools, temperature, reasoning_effort)
+        message, output = _parse_response(payload)
+        for item in output:
+            if item.get("type") == "function_call":
+                self._raw_items_by_call_id[str(item["call_id"])] = output
+        return message
+
+    def complete_raw(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        temperature: float | None = None,
+        reasoning_effort: str | float | None = None,
+    ) -> dict[str, Any]:
+        """Return the unmodified Responses payload for callers that validate their own contract."""
         history_call_ids = _history_call_ids(messages)
         self._raw_items_by_call_id = {
             call_id: items
@@ -102,11 +117,7 @@ class ResponsesClient:
                         duration_s=time.time() - t_start,
                     )
                 if response.status_code == 200:
-                    message, output = _parse_response(response.json())
-                    for item in output:
-                        if item.get("type") == "function_call":
-                            self._raw_items_by_call_id[str(item["call_id"])] = output
-                    return message
+                    return cast(dict[str, Any], response.json())
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code not in (429,) and response.status_code < 500:
                     raise RuntimeError(f"LLM request rejected — {last_error}")

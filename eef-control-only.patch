@@ -1,0 +1,397 @@
+diff --git a/README.md b/README.md
+index fb08303..7639995 100644
+--- a/README.md
++++ b/README.md
+@@ -328,6 +328,7 @@ the compatibility check without extra configuration.
+ | Robot | `--embodiment` | Package | Action contract | Policies in the same package |
+ |---|---|---|---|---|
+ | [I2RT YAM](https://i2rt.com/products/yam-6-dof-arm) bimanual arms | `yam_arms` | [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) | 14-D `joint_pos` (2 × [6 joints + gripper]) | `molmoact2`, `gr00t` |
++| I2RT YAM bimanual arms, Cartesian EEF control | `yam_eef` | [inspect-robots-yam-eef](plugins/inspect-robots-yam-eef/) | 14-D `eef_abs_pose` (2 × [x, y, z, yaw, pitch, roll, gripper]) | `agent` (separate package) |
+ | [Franka](https://franka.de/) FR3 and Panda | `franka` | [inspect-robots-franka](https://github.com/robocurve/inspect-robots-franka) | 8-D `joint_pos` (7 joints + gripper) | `openpi` |
+ | [AgiBot](https://www.agibot.com/) A2 Ultra dual arms | `a2_arms` | [inspect-robots-agibot-a2](https://github.com/robocurve/inspect-robots-agibot-a2) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `go1`, `openpi` |
+ | [Unitree G1](https://www.unitree.com/g1) arms, standing | `g1_arms` | [inspect-robots-unitree-g1](https://github.com/robocurve/inspect-robots-unitree-g1) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `gr00t` |
+diff --git a/plugins/inspect-robots-agent/src/inspect_robots_agent/policy.py b/plugins/inspect-robots-agent/src/inspect_robots_agent/policy.py
+index 5609740..229af32 100644
+--- a/plugins/inspect-robots-agent/src/inspect_robots_agent/policy.py
++++ b/plugins/inspect-robots-agent/src/inspect_robots_agent/policy.py
+@@ -119,6 +119,12 @@ _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r}
+ through tool calls. Each observation message gives you the current \
+ proprioceptive state and camera images. Work toward the user's goal in \
+ small, deliberate motions; re-check the observation after every motion. \
++If the robot has an orientable gripper, consider its approach orientation for \
++every grasp, especially for small objects on a table. A level gripper can miss \
++the object; when an angled or downward approach is needed, explicitly command \
++a suitable tilt using available orientation axes within their bounds. Try small \
++tilt changes above the surface, re-check the observation, then descend and \
++close while keeping the wrist clear. \
+ Every move tool call must include a `note`: in one or two sentences, say what \
+ you observe in the current observation and why you chose this motion. The user \
+ is watching these notes to see what you see and what you decide, so write them \
+@@ -138,6 +144,12 @@ proprioceptive state. Camera images are not attached automatically; call \
+ `take_pic` to see them. A camera already shown for the current observation \
+ cannot be re-taken until the robot moves. Work toward the user's goal in \
+ small, deliberate motions; re-check the observation after every motion. \
++If the robot has an orientable gripper, consider its approach orientation for \
++every grasp, especially for small objects on a table. A level gripper can miss \
++the object; when an angled or downward approach is needed, explicitly command \
++a suitable tilt using available orientation axes within their bounds. Try small \
++tilt changes above the surface, re-check the observation, then descend and \
++close while keeping the wrist clear. \
+ Every move tool call must include a `note`: in one or two sentences, say what \
+ you observe in the current observation and why you chose this motion. The user \
+ is watching these notes to see what you see and what you decide, so write them \
+diff --git a/plugins/inspect-robots-yam-eef/README.md b/plugins/inspect-robots-yam-eef/README.md
+new file mode 100644
+index 0000000..3e120cd
+--- /dev/null
++++ b/plugins/inspect-robots-yam-eef/README.md
+@@ -0,0 +1,74 @@
++# inspect-robots-yam-eef
++
++This plugin registers `yam_eef`, a separately selectable EEF control mode for
++the I2RT YAM bimanual arms. It uses the tested Cartesian implementation in
++`inspect-robots-yam`: the agent emits a 14-value absolute EEF target; YAM
++uses measured joint state and its previous command to solve IK, then sends a
++bounded joint target to the two motor controllers. The robot remains responsible
++for cameras, homing, operator interaction, and joint limits.
++
++Install into the environment that already contains `inspect-robots-yam` and
++`inspect-robots-agent`:
++
++```bash
++uv pip install -e ./plugins/inspect-robots-yam-eef
++```
++
++By default, `yam_eef` uses the same joint-space home as YAM's joint-control
++mode: six zero joint angles and an open gripper for each arm. This overrides
++YAM's provisional EEF-specific home, which has different joint angles. You
++can supply a rig-validated 14-value `home_pose` or saved YAM `start_pose`
++to override the default. Both poses use `[left_j0..j5, left_gripper, right_j0..j5,
++right_gripper]` (radians, with grippers normalized 0 closed to 1 open). The
++selected pose must also lie within the configured EEF workspace after FK.
++
++Run the generic agent with the new embodiment name:
++
++```bash
++inspect-robots run \
++  --instruction "Pick up the block and place it back on the table." \
++  --policy agent --embodiment yam_eef \
++  -P model=openai/gpt-6-astra -P wire=responses \
++  -P images=always -P max_speed_frac=0.25 \
++  --max-steps 2000 --scorer operator
++```
++
++Your existing `[embodiment.args]` camera, CAN, and other applicable YAM
++settings still apply. The default `rest_pose` is also YAM's zero-joint,
++open-gripper pose. Set `rest_pose=none` to park at the joint pose captured
++before reset, or supply an explicit pose after validating its ramp and
++gravity-stable endpoint. Remove `control_interface = joints` if it is
++present: `yam_eef` fixes that setting to `eef_pos`. The explicit CLI option
++`-E control_interface=eef_pos` is also accepted. Inspect the selected contract
++without moving the robot:
++
++```bash
++inspect-robots list embodiments
++inspect-robots doctor --embodiment yam_eef
++```
++
++The agent receives `joint_pos` and `eef_state` observations and uses `move_to`
++with `left_x`, `left_y`, `left_z`, `left_yaw`, `left_pitch`, `left_roll`,
++`left_gripper`, and the matching `right_*` fields. Each arm's x/y/z values are
++metres in its **own base frame**, not a shared world frame. Orientation values
++are radians relative to the pose captured at reset. Gripper values range from
++0 (closed) to 1 (open). The default pitch and roll axes are pinned at zero;
++`-E eef_orientation=true` opens them, subject to workspace configuration.
++The system prompt also describes the YAM grasp-site tool axes and tells the
++agent to choose an approach from live images and verify it against measured
++`eef_state`. It does not supply an object pose or a preplanned grasp. With the
++default zero-joint home, the tool approaches horizontally. When
++`eef_orientation=true` opens the otherwise default bounds, pitch is limited
++to +/-0.6 rad, or about 34 degrees of tilt. A nearly vertical
++top-down approach needs a rig-validated wider pitch workspace and reachable
++IK at a collision-free height. Do not infer that from prompt text alone.
++
++The action space's workspace bounds and the standard CLI clamp and step
++limits still apply. The YAM IK layer limits per-step joint motion and holds
++the previous arm command for nonfinite solutions. YAM's EEF mode currently
++does **not** run its joint-space arm/table or arm/arm collision approver; its
++IK may also return a limited iterate for a target it cannot reach exactly.
++Use small moves, reobserve after each chunk, and validate the workspace and
++table height on the actual rig with an operator at the e-stop. See the
++`Cartesian EEF mode` section in the `inspect-robots-yam` README for the full
++coordinate and safety contract.
+diff --git a/plugins/inspect-robots-yam-eef/pyproject.toml b/plugins/inspect-robots-yam-eef/pyproject.toml
+new file mode 100644
+index 0000000..9039f20
+--- /dev/null
++++ b/plugins/inspect-robots-yam-eef/pyproject.toml
+@@ -0,0 +1,44 @@
++[build-system]
++requires = ["hatchling>=1.18"]
++build-backend = "hatchling.build"
++
++[project]
++name = "inspect-robots-yam-eef"
++version = "0.1.0"
++description = "Named Cartesian EEF embodiment for the I2RT YAM bimanual arms."
++readme = "README.md"
++requires-python = ">=3.10"
++license = "MIT"
++authors = [{ name = "Inspect Robots contributors" }]
++dependencies = [
++    "inspect-robots>=0.58",
++    "inspect-robots-yam>=0.36.1.dev0,<0.37",
++]
++
++[project.optional-dependencies]
++dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "inspect-robots-agent>=0.26.0"]
++
++[project.entry-points."inspect_robots.embodiments"]
++yam_eef = "inspect_robots_yam_eef:YamEEFEmbodiment"
++
++[tool.uv.sources]
++inspect-robots = { workspace = true }
++inspect-robots-agent = { workspace = true }
++
++[tool.hatch.build.targets.wheel]
++packages = ["src/inspect_robots_yam_eef"]
++
++[tool.hatch.build.targets.sdist]
++include = ["src/inspect_robots_yam_eef", "tests", "README.md"]
++
++[tool.ruff]
++extend = "../../pyproject.toml"
++
++[tool.ruff.lint.isort]
++known-first-party = ["inspect_robots", "inspect_robots_yam", "inspect_robots_yam_eef"]
++
++[tool.ruff.lint.per-file-ignores]
++"tests/**" = ["D1"]
++
++[tool.mypy]
++strict = true
+diff --git a/plugins/inspect-robots-yam-eef/src/inspect_robots_yam_eef/__init__.py b/plugins/inspect-robots-yam-eef/src/inspect_robots_yam_eef/__init__.py
+new file mode 100644
+index 0000000..c31a89f
+--- /dev/null
++++ b/plugins/inspect-robots-yam-eef/src/inspect_robots_yam_eef/__init__.py
+@@ -0,0 +1,64 @@
++"""A separately selectable Cartesian EEF interface for the YAM embodiment."""
++
++from __future__ import annotations
++
++from dataclasses import replace
++from typing import Any
++
++from inspect_robots_yam import YamConfig
++from inspect_robots_yam.config import DEFAULT_JOINT_HOME_POSE
++from inspect_robots_yam.embodiment import YAMEmbodiment
++
++__all__ = ["YamEEFEmbodiment"]
++
++_EEF_GRASP_NOTES = """EEF grasp planning on the real robot:
++- The grasp_site tool +z axis is the approach direction, pointing from the wrist toward the fingertips. Tool +y is the jaw-opening and closing axis. A top-down approach needs tool +z to point toward the table. Yaw turns the approach direction within the horizontal plane; pitch and roll can change its tilt.
++- Infer the object's location and accessible faces from live camera images. No object pose, demonstration, or scene geometry is supplied. Plan the grasp approach direction as well as x/y/z. If an angled approach is needed, include an explicit orientation target within the move_to bounds rather than leaving the current tilt unchanged.
++- Camera image up/down is not the arm's base-frame forward/back. The wrist cameras move and tilt with the gripper, and an object at the bottom of a wrist frame may already be at or behind the fingertips. Check the top view and compare images before/after a small, clear-height motion before deciding which base-frame direction to move. If the target is disappearing under the near image edge, reconsider the direction rather than repeatedly advancing.
++- Select a jaw-closing direction from the visible object shape and include yaw when the jaws need to rotate around the vertical axis to span it. Pitch changes the approach tilt; it does not align the jaws with an object rotated on the tabletop.
++- Orientation commands and eef_state yaw/pitch/roll are relative to the orientation captured at reset. Compare the requested pose with the next measured eef_state and camera views before closing the gripper. An IK command is not proof that the requested pose was reached. If tracking is poor, try a safer approach position or height while preserving the contact direction needed for the grasp; do not tilt solely to make IK pass.
++- Try orientation changes at a clear height before descending. Keep the wrist, camera housing, and fingertips clear of the table throughout the path."""
++
++_DEFAULT_HOME_ORIENTATION_NOTE = (
++    "At the default zero-joint home, tool +z points along base +x, so zero "
++    "relative pitch/roll is a forward, horizontal approach. Negative pitch "
++    "tilts that tool axis toward base -z; yaw or roll alone cannot point it down. "
++    "The available pitch bounds may permit only a shallow tilt, not a "
++    "top-down grasp."
++)
++
++
++class YamEEFEmbodiment(YAMEmbodiment):
++    """Use YAM's native EEF -> IK -> joint command path under ``yam_eef``.
++
++    All YAM constructor options, camera sources, operator hooks, and hardware
++    guardrails are inherited. ``control_interface`` is fixed to ``eef_pos`` so
++    selecting this registered embodiment cannot silently select joint control.
++    Without an explicit home or named start pose, use the same zero-joint,
++    open-gripper home as the original YAM joint-control embodiment.
++    """
++
++    def __init__(self, config: YamConfig | None = None, **kwargs: Any) -> None:
++        if config is not None:
++            if config.control_interface != "eef_pos":
++                raise ValueError("yam_eef requires config.control_interface='eef_pos'")
++            if "control_interface" in kwargs:
++                raise ValueError("pass control_interface in config or keyword arguments, not both")
++            if config.home_pose is None and config.start_pose is None:
++                config = replace(config, home_pose=DEFAULT_JOINT_HOME_POSE)
++        else:
++            interface = kwargs.pop("control_interface", "eef_pos")
++            if interface != "eef_pos":
++                raise ValueError("yam_eef requires control_interface='eef_pos'")
++            if kwargs.get("home_pose") is None and kwargs.get("start_pose") is None:
++                kwargs["home_pose"] = DEFAULT_JOINT_HOME_POSE
++            kwargs["control_interface"] = "eef_pos"
++        super().__init__(config=config, **kwargs)
++        docs = self.info.docs + "\n\n" + _EEF_GRASP_NOTES
++        if (
++            self._cfg.start_pose is None
++            and self._cfg.home_pose is not None
++            and tuple(self._cfg.home_pose) == DEFAULT_JOINT_HOME_POSE
++        ):
++            docs += "\n" + _DEFAULT_HOME_ORIENTATION_NOTE
++        self.info = replace(self.info, name="yam_eef", docs=docs)
+diff --git a/plugins/inspect-robots-yam-eef/src/inspect_robots_yam_eef/py.typed b/plugins/inspect-robots-yam-eef/src/inspect_robots_yam_eef/py.typed
+new file mode 100644
+index 0000000..e69de29
+diff --git a/plugins/inspect-robots-yam-eef/tests/test_yam_eef.py b/plugins/inspect-robots-yam-eef/tests/test_yam_eef.py
+new file mode 100644
+index 0000000..6516d46
+--- /dev/null
++++ b/plugins/inspect-robots-yam-eef/tests/test_yam_eef.py
+@@ -0,0 +1,146 @@
++"""The named EEF plugin passes Cartesian actions through YAM's IK path."""
++
++from __future__ import annotations
++
++import json
++
++import numpy as np
++import pytest
++
++from inspect_robots.scene import Scene
++from inspect_robots_agent._llm import ToolCall
++from inspect_robots_agent._tools import build_toolset
++from inspect_robots_yam import YamConfig
++from inspect_robots_yam.config import DEFAULT_EEF_HOME_POSE, DEFAULT_JOINT_HOME_POSE
++from inspect_robots_yam_eef import YamEEFEmbodiment
++
++
++class _Driver:
++    def __init__(self) -> None:
++        self.joints = np.zeros(14)
++        self.commands: list[np.ndarray] = []
++
++    def get_joint_pos(self) -> np.ndarray:
++        return self.joints.copy()
++
++    def get_joint_eff(self) -> np.ndarray:
++        return np.zeros(14)
++
++    def get_motor_temps(self) -> np.ndarray:
++        return np.full(14, 30.0)
++
++    def command_joint_pos(self, target: np.ndarray) -> None:
++        self.joints = target.copy()
++        self.commands.append(target.copy())
++
++    def close(self) -> None:
++        pass
++
++
++class _RawKinematics:
++    def __init__(self, joint_offset: float) -> None:
++        self.ranges = np.array([[-2.0, 2.0]] * 6 + [[0.0, 0.04], [0.0, 0.04]])
++        self.joint_offset = joint_offset
++        self.targets: list[np.ndarray] = []
++
++    def get_joint_ranges(self) -> np.ndarray:
++        return self.ranges.copy()
++
++    def set_joint_ranges(self, ranges: np.ndarray) -> None:
++        self.ranges = ranges.copy()
++
++    def fk(self, _q: np.ndarray) -> np.ndarray:
++        pose = np.eye(4)
++        pose[:3, 3] = [0.3, 0.0, 0.2]
++        return pose
++
++    def ik(self, target: np.ndarray, init_q: np.ndarray, _max_iters: int) -> tuple[bool, np.ndarray]:
++        self.targets.append(target.copy())
++        result = init_q.copy()
++        result[:6] += self.joint_offset
++        return True, result
++
++
++def test_named_eef_mode_runs_ik_then_sends_joint_targets() -> None:
++    driver = _Driver()
++    left, right = _RawKinematics(0.05), _RawKinematics(-0.05)
++    image = np.zeros((4, 4, 3), dtype=np.uint8)
++    embodiment = YamEEFEmbodiment(
++        cam_height=4,
++        cam_width=4,
++        unattended=True,
++        rest_secs=0.1,
++        driver_factory=lambda _config: driver,
++        kinematics_factory=lambda _config: (left, right),
++        camera_reader=lambda _config: {name: image for name in ("top_cam", "left_cam", "right_cam")},
++        sleep_fn=lambda _seconds: None,
++        clock=lambda: 0.0,
++    )
++    assert embodiment.info.name == "yam_eef"
++    assert embodiment.info.action_space.semantics.control_mode == "eef_abs_pose"
++    assert embodiment.info.observation_space.state_keys == {"joint_pos", "eef_state"}
++    assert embodiment._cfg.home_pose == DEFAULT_JOINT_HOME_POSE
++    assert embodiment._cfg.rest_pose == DEFAULT_JOINT_HOME_POSE
++
++    try:
++        observed = embodiment.reset(Scene(id="eef", instruction="move"))
++        np.testing.assert_allclose(observed.state["joint_pos"], DEFAULT_JOINT_HOME_POSE)
++        toolset = build_toolset(
++            embodiment.info.action_space,
++            embodiment.info.observation_space,
++            control_hz=embodiment.info.control_hz,
++        )
++        assert toolset.schemas()[0]["function"]["name"] == "move_to"
++        proposed = toolset.execute(
++            ToolCall(
++                id="move-1",
++                name="move_to",
++                arguments=json.dumps(
++                    {
++                        "targets": {
++                            "left_x": 0.35,
++                            "right_y": 0.1,
++                            "left_gripper": 0.2,
++                            "right_gripper": 0.8,
++                        },
++                        "note": "Both arms are in the home pose; move them to the target.",
++                    }
++                ),
++            ),
++            observed,
++        )
++        assert proposed.error is None
++        assert proposed.chunk is not None
++        result = embodiment.step(proposed.chunk.actions[-1])
++        assert left.targets[-1][0, 3] == pytest.approx(0.35)
++        assert right.targets[-1][1, 3] == pytest.approx(0.1)
++        np.testing.assert_allclose(
++            driver.commands[-1][:6], np.array(DEFAULT_JOINT_HOME_POSE[:6]) + 0.05
++        )
++        np.testing.assert_allclose(
++            driver.commands[-1][7:13], np.array(DEFAULT_JOINT_HOME_POSE[7:13]) - 0.05
++        )
++        np.testing.assert_allclose(driver.commands[-1][[6, 13]], [0.2, 0.8])
++        assert "eef_state" in result.observation.state
++    finally:
++        embodiment.close()
++
++
++def test_joint_mode_cannot_be_selected_under_eef_name() -> None:
++    with pytest.raises(ValueError, match="control_interface='eef_pos'"):
++        YamEEFEmbodiment(control_interface="joints")
++    with pytest.raises(ValueError, match="config.control_interface='eef_pos'"):
++        YamEEFEmbodiment(YamConfig())
++
++
++def test_config_object_uses_joint_home_unless_overridden() -> None:
++    default = YamEEFEmbodiment(YamConfig(control_interface="eef_pos"))
++    assert default._cfg.home_pose == DEFAULT_JOINT_HOME_POSE
++    assert default._cfg.rest_pose == DEFAULT_JOINT_HOME_POSE
++    assert "No object pose, demonstration, or scene geometry is supplied" in default.info.docs
++    assert "Negative pitch tilts that tool axis toward base -z" in default.info.docs
++    overridden = YamEEFEmbodiment(
++        YamConfig(control_interface="eef_pos", home_pose=DEFAULT_EEF_HOME_POSE)
++    )
++    assert overridden._cfg.home_pose == DEFAULT_EEF_HOME_POSE
++    assert "At the default zero-joint home" not in overridden.info.docs

@@ -1,0 +1,56 @@
+{
+  "episode_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "scene_id": "synthetic-demo",
+  "calibration": "../tests/fixtures/synthetic_calibration_v1.json",
+  "mjcf": "../tests/fixtures/tiny_yam.xml",
+  "rig": {
+    "cam_height": 101,
+    "cam_width": 101,
+    "collision_left_base_pos": [0.0, 0.2, 0.2],
+    "collision_right_base_pos": [0.0, -0.2, 0.2],
+    "collision_left_base_yaw": 0.0,
+    "collision_right_base_yaw": 0.0,
+    "collision_table_height": 0.0
+  },
+  "max_image_age_s": 0.5,
+  "max_skew_s": 0.2,
+  "max_dispatch_age_s": 0.5,
+  "inference_budget_s": 30.0,
+  "rounds": [
+    {
+      "replay_at": 10.0,
+      "state_time": 9.9,
+      "image_times": {"top_cam": 9.9, "left_cam": 9.9, "right_cam": 9.9},
+      "rgb": {
+        "top_cam": "captures/0001-top_cam.npy",
+        "left_cam": "captures/0001-left_cam.npy",
+        "right_cam": "captures/0001-right_cam.npy"
+      },
+      "joint_pos": [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1],
+      "instruction": "place objects in box",
+      "agent": {"preferred_id": "move", "candidates": [
+        {"id": "move", "targets": {"left_j0": 0.1}, "note": "synthetic move",
+         "intended_effect": "move left arm"}
+      ]},
+      "jev_id": "move"
+    },
+    {
+      "replay_at": 10.2,
+      "state_time": 10.1,
+      "image_times": {"top_cam": 10.1, "left_cam": 10.1, "right_cam": 10.1},
+      "rgb": {
+        "top_cam": "captures/0002-top_cam.npy",
+        "left_cam": "captures/0002-left_cam.npy",
+        "right_cam": "captures/0002-right_cam.npy"
+      },
+      "joint_pos": [0.1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1],
+      "instruction": "place objects in box",
+      "approvals": [],
+      "agent": {"preferred_id": "next", "candidates": [
+        {"id": "next", "targets": {"right_j0": 0.1}, "note": "synthetic move",
+         "intended_effect": "move right arm"}
+      ]},
+      "jev_id": "next"
+    }
+  ]
+}

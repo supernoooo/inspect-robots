@@ -1,0 +1,59 @@
+<mujoco model="tiny_yam_kinematics_only">
+  <compiler angle="radian"/>
+  <worldbody>
+    <body name="bimanual_base">
+      <body name="left_link_1" pos="0 0.2 0.2">
+        <joint name="left_joint1" type="hinge" axis="0 0 1" range="-3 3"/>
+        <geom type="sphere" size="0.01" mass="0.1"/>
+        <body name="left_link_2" pos="0.18 0 0">
+          <joint name="left_joint2" type="hinge" axis="0 1 0" range="-3 3"/>
+          <geom type="sphere" size="0.01" mass="0.1"/>
+          <body name="left_link_3" pos="0.18 0 0">
+            <joint name="left_joint3" type="hinge" axis="0 1 0" range="-3 3"/>
+            <geom type="sphere" size="0.01" mass="0.1"/>
+            <body name="left_link_4" pos="0.15 0 0">
+              <joint name="left_joint4" type="hinge" axis="1 0 0" range="-3 3"/>
+              <geom type="sphere" size="0.01" mass="0.1"/>
+              <body name="left_link_5" pos="0.10 0 0">
+                <joint name="left_joint5" type="hinge" axis="0 1 0" range="-3 3"/>
+                <geom type="sphere" size="0.01" mass="0.1"/>
+                <body name="left_link_6" pos="0.08 0 0">
+                  <joint name="left_joint6" type="hinge" axis="0 0 1" range="-3 3"/>
+                  <geom type="sphere" size="0.01" mass="0.1"/>
+                  <body name="left_finger_body"><joint name="left_left_finger" type="hinge" axis="0 1 0" range="-0.0475 0"/><geom type="sphere" size="0.005" mass="0.01"/></body>
+                  <body name="left_other_finger_body"><joint name="left_right_finger" type="hinge" axis="0 1 0" range="-0.0475 0"/><geom type="sphere" size="0.005" mass="0.01"/></body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_link_1" pos="0 -0.2 0.2">
+        <joint name="right_joint1" type="hinge" axis="0 0 1" range="-3 3"/>
+        <geom type="sphere" size="0.01" mass="0.1"/>
+        <body name="right_link_2" pos="0.18 0 0">
+          <joint name="right_joint2" type="hinge" axis="0 1 0" range="-3 3"/>
+          <geom type="sphere" size="0.01" mass="0.1"/>
+          <body name="right_link_3" pos="0.18 0 0">
+            <joint name="right_joint3" type="hinge" axis="0 1 0" range="-3 3"/>
+            <geom type="sphere" size="0.01" mass="0.1"/>
+            <body name="right_link_4" pos="0.15 0 0">
+              <joint name="right_joint4" type="hinge" axis="1 0 0" range="-3 3"/>
+              <geom type="sphere" size="0.01" mass="0.1"/>
+              <body name="right_link_5" pos="0.10 0 0">
+                <joint name="right_joint5" type="hinge" axis="0 1 0" range="-3 3"/>
+                <geom type="sphere" size="0.01" mass="0.1"/>
+                <body name="right_link_6" pos="0.08 0 0">
+                  <joint name="right_joint6" type="hinge" axis="0 0 1" range="-3 3"/>
+                  <geom type="sphere" size="0.01" mass="0.1"/>
+                  <body name="right_finger_body"><joint name="right_left_finger" type="hinge" axis="0 1 0" range="-0.0475 0"/><geom type="sphere" size="0.005" mass="0.01"/></body>
+                  <body name="right_other_finger_body"><joint name="right_right_finger" type="hinge" axis="0 1 0" range="-0.0475 0"/><geom type="sphere" size="0.005" mass="0.01"/></body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

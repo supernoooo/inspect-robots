@@ -38,18 +38,40 @@ from inspect_robots_agent._llm import (
 from inspect_robots_agent._png import encode_png, png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent.policy import AgentPolicyConfig, LLMAgentPolicy, agent_policy
+from inspect_robots_agent.proposals import (
+    AgentProposer,
+    CameraVisualEstimate,
+    PredictedVisualDelta,
+    ProposalBatch,
+    ProposalCandidate,
+    ProposalFailure,
+    ProposalFeedback,
+    ProposalResult,
+    ProposalTermination,
+    VisualPoint,
+)
 
 __all__ = [
     "ENV_MODEL",
     "AgentPolicyConfig",
+    "AgentProposer",
     "AnthropicClient",
     "AssistantMessage",
+    "CameraVisualEstimate",
     "ChatClient",
     "GeminiLiveClient",
     "InteractionsClient",
     "LLMAgentPolicy",
     "Provider",
+    "PredictedVisualDelta",
+    "ProposalBatch",
+    "ProposalCandidate",
+    "ProposalFailure",
+    "ProposalFeedback",
+    "ProposalResult",
+    "ProposalTermination",
     "ResponsesClient",
+    "VisualPoint",
     "agent_policy",
     "encode_png",
     "png_data_url",

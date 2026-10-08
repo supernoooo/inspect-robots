@@ -119,6 +119,12 @@ _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r}
 through tool calls. Each observation message gives you the current \
 proprioceptive state and camera images. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
+If the robot has an orientable gripper, consider its approach orientation for \
+every grasp, especially for small objects on a table. A level gripper can miss \
+the object; when an angled or downward approach is needed, explicitly command \
+a suitable tilt using available orientation axes within their bounds. Try small \
+tilt changes above the surface, re-check the observation, then descend and \
+close while keeping the wrist clear. \
 Every move tool call must include a `note`: in one or two sentences, say what \
 you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \
@@ -138,6 +144,12 @@ proprioceptive state. Camera images are not attached automatically; call \
 `take_pic` to see them. A camera already shown for the current observation \
 cannot be re-taken until the robot moves. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
+If the robot has an orientable gripper, consider its approach orientation for \
+every grasp, especially for small objects on a table. A level gripper can miss \
+the object; when an angled or downward approach is needed, explicitly command \
+a suitable tilt using available orientation axes within their bounds. Try small \
+tilt changes above the surface, re-check the observation, then descend and \
+close while keeping the wrist clear. \
 Every move tool call must include a `note`: in one or two sentences, say what \
 you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \

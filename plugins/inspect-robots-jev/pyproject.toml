@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-jev"
+version = "0.1.0"
+description = "Jev policy contract and safe scaffold for the bimanual YAM task."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+dependencies = [
+    "inspect-robots>=0.2",
+    "inspect-robots-agent==0.26.0",
+    "inspect-robots-yam==0.36.1.dev0",
+    "numpy>=1.24",
+    "mujoco>=3.0",
+    "json-numpy>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.11", "ruff>=0.6"]
+
+[project.entry-points."inspect_robots.policies"]
+jev-direct = "inspect_robots_jev:jev_direct_policy"
+jev-hybrid = "inspect_robots_jev:jev_hybrid_policy"
+jev-agent = "inspect_robots_jev:jev_agent_policy"
+
+[tool.uv.sources]
+inspect-robots = { workspace = true }
+inspect-robots-agent = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_jev"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_jev", "tests", "README.md"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_yam", "inspect_robots_jev"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
+
+[tool.mypy]
+strict = true

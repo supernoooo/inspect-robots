@@ -328,6 +328,7 @@ the compatibility check without extra configuration.
 | Robot | `--embodiment` | Package | Action contract | Policies in the same package |
 |---|---|---|---|---|
 | [I2RT YAM](https://i2rt.com/products/yam-6-dof-arm) bimanual arms | `yam_arms` | [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) | 14-D `joint_pos` (2 × [6 joints + gripper]) | `molmoact2`, `gr00t` |
+| I2RT YAM bimanual arms, Cartesian EEF control | `yam_eef` | [inspect-robots-yam-eef](plugins/inspect-robots-yam-eef/) | 14-D `eef_abs_pose` (2 × [x, y, z, yaw, pitch, roll, gripper]) | `agent` (separate package) |
 | [Franka](https://franka.de/) FR3 and Panda | `franka` | [inspect-robots-franka](https://github.com/robocurve/inspect-robots-franka) | 8-D `joint_pos` (7 joints + gripper) | `openpi` |
 | [AgiBot](https://www.agibot.com/) A2 Ultra dual arms | `a2_arms` | [inspect-robots-agibot-a2](https://github.com/robocurve/inspect-robots-agibot-a2) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `go1`, `openpi` |
 | [Unitree G1](https://www.unitree.com/g1) arms, standing | `g1_arms` | [inspect-robots-unitree-g1](https://github.com/robocurve/inspect-robots-unitree-g1) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `gr00t` |
