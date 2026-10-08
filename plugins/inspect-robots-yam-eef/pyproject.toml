@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-yam-eef"
+version = "0.1.0"
+description = "Named Cartesian EEF embodiment for the I2RT YAM bimanual arms."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+dependencies = [
+    "inspect-robots>=0.58",
+    "inspect-robots-yam>=0.36.1.dev0,<0.37",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "inspect-robots-agent>=0.26.0"]
+
+[project.entry-points."inspect_robots.embodiments"]
+yam_eef = "inspect_robots_yam_eef:YamEEFEmbodiment"
+
+[tool.uv.sources]
+inspect-robots = { workspace = true }
+inspect-robots-agent = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_yam_eef"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_yam_eef", "tests", "README.md"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_yam", "inspect_robots_yam_eef"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
+
+[tool.mypy]
+strict = true

@@ -1,0 +1,22 @@
+[defaults]
+policy = agent            # from the inspect-robots-yam plugin
+embodiment = yam_eef      # same plugin; cameras configured below
+scorer = success_at_end
+max_steps = 1200          # 120 s at 10 Hz
+rerun = true              # live viewer of cameras/state/actions each run
+store_frames = true       # save each run's camera frames under logs/frames/
+
+[embodiment.args]
+left_channel = can_follower2_l
+right_channel = can_follower2_r
+top_cam_device = /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435_Intel_R__RealSense_TM__Depth_Camera_435_343223024587-video-index0
+left_cam_device = /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323074247-video-index4
+right_cam_device = /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323070972-video-index4
+auto_start = true
+collision_guardrail = false
+report_joint_eff = false
+eef_orientation = false
+motor_temp_limit = 70
+
+[policy.args]
+images = on_demand
