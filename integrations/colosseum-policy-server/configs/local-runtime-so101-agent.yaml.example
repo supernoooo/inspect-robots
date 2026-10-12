@@ -1,0 +1,46 @@
+# Native Inspect LLM catalog; no Policy Server process is started.
+host: 127.0.0.1
+port: 8000
+backend:
+  name: auto
+  options:
+    llm:
+      robot_type: so101
+      sensors: [head_image, left_image]
+      effort: medium
+      max_llm_calls: 60
+      max_speed_frac: 0.05
+models:
+  # Name, revision and joint action contract must match Router registration.
+  # URL is the local official API endpoint; Router may register a relay URL.
+  # Router-assigned control_hz overrides this local-pair default at runtime.
+  - name: grok-4.7
+    model_type: llm
+    url: https://api.x.ai/v1
+    revision: "4.7"
+    action_space: joint_position
+    action_dim: 6
+    control_hz: 10
+    max_horizon: 150
+    endpoint: inprocess://inspect-agent
+    backend_options: {robot_type: so101}
+  - name: claude-opus-5-5
+    model_type: llm
+    url: https://api.anthropic.com/v1
+    revision: rig-v1
+    action_space: joint_position
+    action_dim: 6
+    control_hz: 10
+    max_horizon: 150
+    endpoint: inprocess://inspect-agent
+    backend_options: {robot_type: so101}
+  - name: gpt-6-astra
+    model_type: llm
+    url: https://api.openai.com/v1
+    revision: rig-v1
+    action_space: joint_position
+    action_dim: 6
+    control_hz: 10
+    max_horizon: 150
+    endpoint: inprocess://inspect-agent
+    backend_options: {robot_type: so101}

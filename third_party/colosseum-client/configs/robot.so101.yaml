@@ -1,0 +1,38 @@
+router_url: wss://191.222.219.43
+token: clt_M3YJv7Sqw2Z1BAjk9n7lAix4CPJbd5Yn1KUjPSS8_bo
+institution: NUS
+robot_type: so101
+track: 1
+# Open Track: leave scene/instruction empty to be prompted at start-up.
+scene: ""
+evaluator: ""
+policy_server_url: ws://127.0.0.1:8000
+llm_api_keys:
+  openai: env:OPENAI_API_KEY
+  xai: env:XAI_API_KEY
+  anthropic: env:ANTHROPIC_API_KEY
+control_hz: 30
+deadline_ms: 120000
+image_width: 640
+image_height: 480
+cameras:
+  head_image: "262522073381"
+  # Second view. The Router only knows the role names head_image/left_image/right_image, so
+  # whichever second camera is used takes the left_image role. Swap the two lines below to change it.
+  left_image: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB2.0_CAM1_USB2.0_CAM1-video-index0   # wrist USB camera
+  # left_image: "262522073375"   # side RealSense D435 (third-person view)
+adapter_config:
+  port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B8E114717-if00
+  robot_id: follower_arm_open
+  # Degrees implied by ~/.cache/huggingface/lerobot/calibration/robots/so_follower/follower_arm_open.json
+  joint_low: [-118.8, -104.0, -97.7, -101.4, -180.0]
+  joint_high: [118.8, 104.0, 97.7, 101.4, 180.0]
+  # G05 starts from its upstream home pose (training-data mean, arm raised), as its official
+  # SO100 client does. The other models start from wherever the arm is placed.
+  start_poses:
+    g05-so101-v1: [3.1, -34.3, 31.5, 55.9, -12.3, 13.4]
+  return_to_start: true
+recording: true
+skip_upload: false
+max_trial_steps: 800
+test: false

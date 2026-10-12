@@ -306,7 +306,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 @pytest.mark.parametrize("failure", [None, "result", "upload"])
 def test_native_cli_records_exports_publishes_and_resumes_without_rerunning(
-    rig: SimpleNamespace, failure: str | None
+    rig: SimpleNamespace, failure: str | None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import pyarrow.parquet as pq
 
@@ -315,6 +315,14 @@ def test_native_cli_records_exports_publishes_and_resumes_without_rerunning(
     assert main(rig.argv) == (1 if failure else 0)
     if failure:
         assert main(["colosseum", "--client-config", str(rig.config), "--resume", "ev_native"]) == 0
+    output = capsys.readouterr().out
+    assert "Router allocated A: gpt-6-astra (revision rig-v1, 30 Hz)" in output
+    assert "Router allocated B: gpt-6-astra (revision rig-v1, 30 Hz)" in output
+    assert output.index("Router allocated A:") < output.index("Router allocated B:")
+    assert output.index("Router allocated A:") < output.index("policy: agent")
+    assert "https://relay.example/v1" not in output
+    assert "unique-provider-secret" not in output
+    assert "router-secret" not in output
     assert rig.executions.count("reset") == 2
     assert rig.executions.count("step") == 4
     assert rig.executions.count("close") == 2
@@ -431,7 +439,9 @@ def test_eef_native_flags_preserve_yam_camera_config_and_explicit_overrides(tmp_
     assert values["control_hz"] == 30
 
 
-def test_router_disconnect_does_not_submit_failed_trial(rig: SimpleNamespace) -> None:
+def test_router_disconnect_does_not_submit_failed_trial(
+    rig: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
     rig.failures["step"] = True
     assert main(rig.argv) == 1
     assert not rig.uploads
@@ -439,6 +449,7 @@ def test_router_disconnect_does_not_submit_failed_trial(rig: SimpleNamespace) ->
     assert not (rig.root / "run_a/bridge-trial.json").exists()
     assert json.loads((rig.root / "run_a/recording-status.json").read_text())["complete"] is False
     assert rig.executions[-1] == "close"
+    assert "same command without --resume to request a new pair" in capsys.readouterr().err
 
 
 def test_deferred_upload_can_be_resumed_without_rerunning(rig: SimpleNamespace) -> None:
@@ -693,6 +704,19 @@ def test_dry_run_never_contacts_router_or_hardware(rig: SimpleNamespace) -> None
     assert not rig.events and not rig.executions
 
 
+def test_interrupted_router_run_directs_operator_to_abort_before_new_assignment(
+    rig: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig.assignment["runs"][0]["state"] = "interrupted"
+    argv = [*rig.argv[:5], "--resume", "ev_native", *rig.argv[5:]]
+    assert main(argv) == 1
+    output = capsys.readouterr().err
+    assert "Abort the old evaluation" in output
+    assert "--abort ev_native" in output
+    assert "new evaluation without --resume" in output
+    assert not rig.executions
+
+
 def test_assignment_validation_failure_does_not_suggest_resuming_missing_id(
     rig: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -728,11 +752,50 @@ def test_ee_flags_and_url_mismatch_rejected_before_assignment(rig: SimpleNamespa
     assert not rig.events
 
 
-def test_pending_evaluation_is_not_implicitly_discarded(rig: SimpleNamespace) -> None:
+def test_pending_evaluation_does_not_block_new_recording_or_get_discarded(
+    rig: SimpleNamespace,
+) -> None:
     rig.root.mkdir(parents=True)
-    (rig.root / "manifest.json").write_text(json.dumps({"bridge": "inspect-robots-v1"}))
-    assert main(rig.argv) == 1
-    assert not rig.events
+    old = {"bridge": "inspect-robots-v1", "assignment": copy.deepcopy(rig.assignment)}
+    (rig.root / "manifest.json").write_text(json.dumps(old))
+    rig.assignment["id"] = "ev_next"
+    rig.assignment["runs"] = [
+        {"id": "next_a", "side": "A", "state": "assigned"},
+        {"id": "next_b", "side": "B", "state": "assigned"},
+    ]
+    record_only = [*rig.argv[:5], "--record-only", *rig.argv[5:]]
+    assert main(record_only) == 0
+    assert ("POST", "/next") in rig.events
+    assert json.loads((rig.root / "manifest.json").read_text()) == old
+    assert (rig.root.parent / "ev_next/manifest.json").is_file()
+
+
+def test_finished_router_recordings_allow_next_pair_while_review_stays_available(
+    rig: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots.colosseum_review import ReviewStore
+
+    first = [*rig.argv[:5], "--record-only", *rig.argv[5:]]
+    assert main(first) == 0
+    old_manifest = rig.root / "manifest.json"
+    old = json.loads(old_manifest.read_text())
+    assert ReviewStore(str(rig.config)).complete("ev_native", old)
+    assert not old.get("submitted") and not old.get("aborted")
+
+    rig.assignment["id"] = "ev_next"
+    rig.assignment["runs"] = [
+        {"id": "next_a", "side": "A", "state": "assigned"},
+        {"id": "next_b", "side": "B", "state": "assigned"},
+    ]
+    assert main(first) == 0
+    assert sum(event[:2] == ("POST", "/next") for event in rig.events) == 2
+    assert (rig.root.parent / "ev_next/manifest.json").is_file()
+    assert json.loads(old_manifest.read_text()) == old
+    store = ReviewStore(str(rig.config))
+    store.save("ev_native", _review_form("75", "100"))
+    rescored = store.load("ev_native")
+    assert rescored["result"]["preference"] == "B"
+    assert not rescored.get("submitted") and not rescored.get("aborted")
 
 
 def test_receipt_clock_preserves_existing_sensor_timestamps() -> None:
@@ -822,6 +885,37 @@ def test_claude_account_constructs_real_agent_without_api_keys(
         agent._client.close()
     with pytest.raises(ValueError, match="official"):
         bridge.make_agent({**model, "url": "https://relay.example"}, config, {})
+
+
+def test_claude_account_accepts_exported_and_native_cli_paths(
+    account_cli: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = RobotClientConfig(
+        url="wss://router.example", token="test", cameras={},
+        llm_account_logins={"anthropic": "claude-code"},
+    )
+    model = {
+        **MODEL, "name": "claude-opus-5-5",
+        "url": "https://api.anthropic.com/v1", "bridge_options": {},
+    }
+    monkeypatch.setenv("SO101_CLAUDE_COMMAND", str(account_cli))
+    bridge.validate_catalog_keys(config, [model])
+    agent = bridge.make_agent(model, config, {})
+    try:
+        assert agent._client.command == str(account_cli.resolve())
+    finally:
+        agent._client.close()
+
+    monkeypatch.setenv("SO101_CLAUDE_COMMAND", "/missing/claude")
+    options = SimpleNamespace(inspect_args=["--", "-P", f"claude_command={account_cli}"])
+    overrides = bridge.native_policy_options(options)
+    assert overrides["claude_command"] == str(account_cli)
+    bridge.validate_catalog_keys(config, [model], overrides)
+    agent = bridge.make_agent(model, config, overrides)
+    try:
+        assert agent._client.command == str(account_cli.resolve())
+    finally:
+        agent._client.close()
 
 
 def test_account_login_pairwise_records_auth_and_defers_submission(

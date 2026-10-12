@@ -1,0 +1,74 @@
+host: 127.0.0.1
+port: 8000
+backend:
+  name: auto
+  options:
+    llm:
+      robot_type: so101
+      joint_low:
+      - -118.8
+      - -104.0
+      - -97.7
+      - -101.4
+      - -180.0
+      joint_high:
+      - 118.8
+      - 104.0
+      - 97.7
+      - 101.4
+      - 180.0
+      joint_max_step:
+      - 1.0
+      - 1.0
+      - 1.0
+      - 1.0
+      - 1.0
+      gripper_open_value: 1
+      gripper_max_step: 5
+      sensors:
+      - head_image
+      - left_image
+      robot_notes: 'SO101 follower. Joint order: shoulder_pan, shoulder_lift, elbow_flex,
+        wrist_flex, wrist_roll; absolute degrees. Positive angles follow the existing
+        LeRobot calibration. head_image is the top view; left_image is the wrist view.
+        Gripper 0 closed, 100 open. Begin with small motions and verify the physical
+        direction and camera geometry before a task.'
+      effort: low
+      max_llm_calls: 30
+      max_speed_frac: 0.1
+      log_dir: agent-logs
+models:
+- name: grok-4.7
+  model_type: llm
+  url: https://api.yhlxj.ai/v1
+  revision: '4.7'
+  action_space: joint_position
+  action_dim: 6
+  control_hz: 30
+  max_horizon: 150
+  endpoint: inprocess://inspect-agent
+  backend_options:
+    robot_type: so101
+- name: claude-opus-5-5
+  model_type: llm
+  url: https://api.yhlxj.ai
+  revision: rig-v1
+  action_space: joint_position
+  action_dim: 6
+  control_hz: 30
+  max_horizon: 150
+  endpoint: inprocess://inspect-agent
+  backend_options:
+    robot_type: so101
+    api_auth: bearer
+- name: gpt-6-astra
+  model_type: llm
+  url: https://api.yhlxj.ai/v1
+  revision: rig-v1
+  action_space: joint_position
+  action_dim: 6
+  control_hz: 30
+  max_horizon: 150
+  endpoint: inprocess://inspect-agent
+  backend_options:
+    robot_type: so101

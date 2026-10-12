@@ -32,7 +32,8 @@ from inspect_robots.types import Action, ActionChunk, Observation
 
 _DISPLACEMENT_MODES = frozenset({"eef_delta_pos", "eef_delta_pose", "joint_delta"})
 _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
-_SAFE_ROT = frozenset({"none", "rot6d"})
+_SAFE_ABSOLUTE_ROT = frozenset({"none", "rot6d"})
+_SAFE_DISPLACEMENT_ROT = frozenset({"none", "axis_angle", "euler_xyz"})
 
 _FALLBACK_HZ = 10.0
 _MAX_DURATION_S = 10.0
@@ -95,6 +96,9 @@ class Toolset:
         low: npt.NDArray[np.float64],
         high: npt.NDArray[np.float64],
         step_limits: npt.NDArray[np.float64],
+        max_chunk_steps: int | None = None,
+        agent_eef_target: bool = False,
+        translation_norm_limit: float | None = None,
         pose: bool = False,
         images: str = "always",
         cameras: tuple[str, ...] = (),
@@ -108,17 +112,28 @@ class Toolset:
         self._state_labels = state_labels
         self._hz = control_hz
         self._resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
-        self._max_steps = math.ceil(_MAX_DURATION_S * self._resolved_hz)
+        self._duration_max_steps = math.ceil(_MAX_DURATION_S * self._resolved_hz)
+        self._chunk_max_steps = max_chunk_steps
+        self._max_steps = min(self._duration_max_steps, max_chunk_steps or self._duration_max_steps)
+        self._agent_eef_target = agent_eef_target
         if pose:
             # Cartesian surfaces get a Cartesian name; the LLM should think in
             # workspace terms, not joints.
             self._move_tool = "move_to" if absolute else "move_by"
         else:
             self._move_tool = "move_joints" if absolute else "move_by"
+        if agent_eef_target:
+            self._move_tool = "move_eef"
         self._bounds_text = bounds_text
+        if max_chunk_steps is not None:
+            self._bounds_text += (
+                f" At most {max_chunk_steps} control steps per call; "
+                "observe the result before requesting another segment."
+            )
         self._low = low
         self._high = high
         self._step_limits = step_limits
+        self._translation_norm_limit = translation_norm_limit
         self._images = images
         self._cameras = cameras
         self._pre_check = pre_check
@@ -135,7 +150,25 @@ class Toolset:
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for this embodiment."""
-        if self._absolute and self._pose:
+        if self._agent_eef_target:
+            move_description = (
+                "Move to an absolute end-effector target in the robot base frame. "
+                "targets may give any of x, y, z in meters, a complete unit quaternion "
+                "qw, qx, qy, qz, and/or an absolute gripper target in 0..100. "
+                "Omitted coordinates and orientation hold their exact measured values; "
+                "omit the quaternion when keeping the current orientation. "
+                "Choose a minimum number of control steps; the trajectory automatically "
+                "uses more steps when needed to reach the full target within the per-step "
+                "bounds. Observe the measured result after the trajectory. "
+                + ("Each step's TOTAL 3D translation length, sqrt(dx^2+dy^2+dz^2), "
+                   f"must be at most {self._translation_norm_limit:g} meters. "
+                   if self._translation_norm_limit is not None else "")
+                + "Per-axis, rotation, and gripper bounds also apply. Targets requiring "
+                "more than the allowed trajectory length are rejected without partial "
+                "execution. Unreachable poses are rejected by IK. " + self._bounds_text
+            )
+            values_key = "targets"
+        elif self._absolute and self._pose:
             move_description = (
                 "Move to absolute Cartesian end-effector targets (meters for "
                 "positions, radians for rotations, per the dimension labels). "
@@ -164,6 +197,16 @@ class Toolset:
                 "into steps that fit the per-action bounds and the result reports its "
                 "step count. Unnamed dimensions do not move. " + self._bounds_text
             )
+            if self._pose:
+                move_description += (
+                    " Cartesian translation uses meters; rotation increments use radians "
+                    "in the embodiment's declared frame."
+                )
+                if self._translation_norm_limit is not None:
+                    move_description += (
+                        f" Each step's total translation is at most "
+                        f"{self._translation_norm_limit:g} meters."
+                    )
             values_key = "deltas"
         move = {
             "type": "function",
@@ -176,8 +219,13 @@ class Toolset:
                         values_key: {
                             "type": "object",
                             "description": (
-                                "Map of dimension name to value. Valid names: "
-                                + ", ".join(self._labels)
+                                ("Absolute EEF targets. Any omitted coordinate or orientation "
+                                 "holds its exact measured value. To change orientation, give "
+                                 "all of qw,qx,qy,qz. Valid names: "
+                                 if self._agent_eef_target else
+                                 "Map of dimension name to value. Valid names: ")
+                                + ("x, y, z, qw, qx, qy, qz, gripper" if self._agent_eef_target
+                                   else ", ".join(self._labels))
                             ),
                         },
                         "note": {
@@ -190,8 +238,17 @@ class Toolset:
                                 "sentences."
                             ),
                         },
+                        **({"steps": {
+                            "type": "integer", "minimum": 1,
+                            "maximum": self._max_steps,
+                            "description": (
+                                "Minimum number of control steps; automatically increased "
+                                "to reach the full target."
+                            ),
+                        }} if self._agent_eef_target else {}),
                     },
-                    "required": [values_key, "note"],
+                    "required": [values_key, "note", "steps"] if self._agent_eef_target
+                    else [values_key, "note"],
                 },
             },
         }
@@ -290,6 +347,8 @@ class Toolset:
             if self._images == "on_demand":
                 available += ", take_pic"
             return ToolResult(error=f"unknown tool {call.name!r}; available: {available}")
+        if self._agent_eef_target:
+            return self._move_eef_target(arguments, observation)
         return self._move(arguments, observation)
 
     def residual(
@@ -372,6 +431,103 @@ class Toolset:
             )
         return ToolResult(capture=tuple(requested))
 
+    def _move_eef_target(
+        self, arguments: dict[str, Any], observation: Observation
+    ) -> ToolResult:
+        """Interpolate the full absolute target into bounded EEF deltas."""
+        state = np.asarray(observation.state.get("eef_state"), dtype=np.float64)
+        current_quat = np.asarray(observation.state.get("eef_quat_wxyz"), dtype=np.float64)
+        if (state.shape != (7,) or current_quat.shape != (4,)
+                or not np.all(np.isfinite(state)) or not np.all(np.isfinite(current_quat))
+                or abs(float(np.linalg.norm(current_quat)) - 1.0) > 1e-3):
+            raise ValueError("EEF target control needs finite measured pose and unit quaternion")
+        note = arguments.get("note")
+        if not isinstance(note, str) or not note.strip():
+            return ToolResult(error="note is required: describe the observation and motion")
+        steps = arguments.get("steps")
+        if (isinstance(steps, bool) or not isinstance(steps, int)
+                or not 1 <= steps <= self._max_steps):
+            return ToolResult(error=f"steps must be an integer from 1 to {self._max_steps}")
+        values = arguments.get("targets")
+        if not isinstance(values, dict) or not values:
+            return ToolResult(error=(
+                "targets must be a non-empty object of EEF coordinates, "
+                "quaternion, or gripper"
+            ))
+        allowed = ("x", "y", "z", "qw", "qx", "qy", "qz", "gripper")
+        unknown = [name for name in values if name not in allowed]
+        if unknown:
+            return ToolResult(error=f"targets contain unknown keys {unknown}")
+        quaternion_keys = ("qw", "qx", "qy", "qz")
+        present_quaternion = [name for name in quaternion_keys if name in values]
+        if present_quaternion and len(present_quaternion) != 4:
+            return ToolResult(error=(
+                "specify all of qw,qx,qy,qz to change orientation, "
+                "or omit all four to hold it"
+            ))
+        target_values: dict[str, float] = {}
+        for name, raw in values.items():
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                return ToolResult(error=f"target {name} must be a finite number")
+            try:
+                target_values[name] = float(raw)
+            except OverflowError:
+                return ToolResult(error=f"target {name} must be a finite number")
+            if not math.isfinite(target_values[name]):
+                return ToolResult(error=f"target {name} must be a finite number")
+        position = np.array([
+            target_values.get(name, float(state[index]))
+            for index, name in enumerate(("x", "y", "z"))
+        ])
+        target_quat = (np.array([target_values[name] for name in quaternion_keys])
+                       if present_quaternion else current_quat.copy())
+        if present_quaternion:
+            norm = float(np.linalg.norm(target_quat))
+            if abs(norm - 1.0) > 1e-3:
+                return ToolResult(error="qw,qx,qy,qz must be a unit quaternion in wxyz order")
+            target_quat /= norm
+        target_gripper = target_values.get("gripper", float(state[6]))
+        if not 0.0 <= target_gripper <= 100.0:
+            return ToolResult(error="gripper target must be within 0..100")
+
+        # Base-frame orientation increment: q_target * inverse(q_measured).
+        if present_quaternion:
+            target_w, target_xyz = target_quat[0], target_quat[1:]
+            measured_w, measured_xyz = current_quat[0], -current_quat[1:]
+            relative_w = target_w * measured_w - float(np.dot(target_xyz, measured_xyz))
+            relative_xyz = (
+                target_w * measured_xyz + measured_w * target_xyz
+                + np.cross(target_xyz, measured_xyz)
+            )
+            if relative_w < 0:
+                relative_w, relative_xyz = -relative_w, -relative_xyz
+            sin_half = float(np.linalg.norm(relative_xyz))
+            rotation = (
+                2.0 * relative_xyz
+                if sin_half < 1e-8
+                else 2.0 * math.atan2(sin_half, relative_w) * relative_xyz / sin_half
+            )
+        else:
+            rotation = np.zeros(3)
+        displacement = np.r_[position - state[:3], rotation, target_gripper - state[6]]
+        if not np.all(np.isfinite(displacement)):
+            return ToolResult(error="target displacement must be finite")
+        limits = np.where(displacement >= 0, self._high, -self._low)
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            ratios = np.abs(displacement) / limits
+            if self._translation_norm_limit is not None:
+                translation_ratio = np.linalg.norm(displacement[:3]) / self._translation_norm_limit
+                ratios[:3] = np.maximum(ratios[:3], translation_ratio)
+        required = float(np.max(ratios))
+        if not math.isfinite(required) or required > self._max_steps:
+            return ToolResult(error=(
+                f"full EEF target exceeds the {self._max_steps}-step trajectory limit; "
+                "no partial motion was executed"
+            ))
+        steps = max(steps, math.ceil(required))
+        per_step = displacement / steps
+        return self._success([Action(data=per_step.copy()) for _ in range(steps)], steps)
+
     def _move(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         current: npt.NDArray[np.float64] | None = None
         if self._absolute:
@@ -451,6 +607,11 @@ class Toolset:
                 if distance > 0 and limit > 0:
                     ratios.append(np.divide(distance, limit))
             ratio = max(ratios, default=np.float64(0.0))
+            if self._translation_norm_limit is not None:
+                translation_ratio = np.divide(
+                    np.linalg.norm(vector[:3]), self._translation_norm_limit
+                )
+                ratio = max(ratio, translation_ratio)
             headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
         if headed_ratio > self._max_steps:
             return self._cap_error()
@@ -510,6 +671,14 @@ class Toolset:
         return self._success(actions, steps)
 
     def _cap_error(self) -> ToolResult:
+        if self._chunk_max_steps is not None and self._chunk_max_steps < self._duration_max_steps:
+            return ToolResult(
+                error=(
+                    f"requested motion exceeds this embodiment's "
+                    f"{self._chunk_max_steps}-step observation interval; "
+                    "split the move into smaller motions"
+                )
+            )
         return ToolResult(
             error=(
                 f"requested motion exceeds the {_MAX_DURATION_S:g}s playout cap; "
@@ -562,10 +731,11 @@ def build_toolset(
             "tell absolute targets from displacements"
         )
     mode = semantics.control_mode
-    if mode in _POSE_MODES and semantics.rotation_repr not in _SAFE_ROT:
+    safe_rot = _SAFE_ABSOLUTE_ROT if mode == "eef_abs_pose" else _SAFE_DISPLACEMENT_ROT
+    if mode in _POSE_MODES and semantics.rotation_repr not in safe_rot:
         raise ToolsetError(
             f"rotation_repr {semantics.rotation_repr!r} cannot be driven per-dimension; "
-            f"only {sorted(_SAFE_ROT)} are supported"
+            f"only {sorted(safe_rot)} are supported for {mode}"
         )
     if mode not in ABSOLUTE_CONTROL_MODES | _DISPLACEMENT_MODES:
         raise ToolsetError(f"control_mode {mode!r} is not supported by the agent policy yet")
@@ -682,6 +852,23 @@ def build_toolset(
 
     authored_labels = semantics.dim_labels
     labels = authored_labels or tuple(str(i) for i in range(dim))
+    if semantics.agent_eef_target:
+        required_fields = {
+            field.key: field.shape
+            for field in observation_space.state.fields
+        } if observation_space.state is not None else {}
+        if (labels != ("x", "y", "z", "rx", "ry", "rz", "gripper")
+                or required_fields.get("eef_state") != (7,)
+                or required_fields.get("eef_quat_wxyz") != (4,)):
+            raise ToolsetError(
+                "agent_eef_target needs seven labeled EEF deltas, measured "
+                "eef_state and eef_quat_wxyz"
+            )
+    translation_norm_limit = None
+    if mode == "eef_delta_pose" and labels[:3] == ("x", "y", "z"):
+        candidate = float(np.min(np.minimum(high64[:3], -low64[:3])))
+        if candidate > 0:
+            translation_norm_limit = candidate
     state_labels: tuple[str, tuple[str, ...]] | None = None
     if authored_labels is not None:
         if state_key is not None:
@@ -690,7 +877,11 @@ def build_toolset(
             candidates = [
                 field.key
                 for field in state_spec.fields
-                if field.shape == (dim,) and field.key in CANONICAL_STATE_UNITS
+                if field.shape == (dim,)
+                and (
+                    field.key in CANONICAL_STATE_UNITS
+                    or (mode.startswith("eef_") and field.key.startswith("eef_"))
+                )
             ]
             if len(candidates) == 1:
                 state_labels = (candidates[0], authored_labels)
@@ -710,6 +901,9 @@ def build_toolset(
         low=low64,
         high=high64,
         step_limits=step_limits,
+        max_chunk_steps=semantics.max_chunk_steps,
+        agent_eef_target=semantics.agent_eef_target,
+        translation_norm_limit=translation_norm_limit,
         pose=mode in _POSE_MODES,
         images=images,
         cameras=tuple(camera.name for camera in observation_space.cameras),
