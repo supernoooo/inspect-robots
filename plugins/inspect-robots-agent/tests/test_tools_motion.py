@@ -1369,6 +1369,44 @@ def test_displacement_pose_mode_keeps_move_by() -> None:
     assert move["description"].startswith("Move BY")
 
 
+def test_axis_angle_eef_delta_pose_labels_custom_eef_state() -> None:
+    labels = ("x", "y", "z", "rx", "ry", "rz", "gripper")
+    space = Box(
+        shape=(7,),
+        low=-np.array([0.002] * 3 + [0.01] * 3 + [0.5]),
+        high=np.array([0.002] * 3 + [0.01] * 3 + [0.5]),
+        semantics=ActionSemantics(
+            "eef_delta_pose", rotation_repr="axis_angle", frame="base",
+            gripper="continuous", dim_labels=labels,
+        ),
+    )
+    observations = ObservationSpace(state=StateSpec(fields=(
+        StateField(key="joint_pos", shape=(6,)),
+        StateField(key="eef_state", shape=(7,)),
+    )))
+    toolset = build_toolset(space, observations, control_hz=10.0)
+    assert toolset.state_labels() == ("eef_state", labels)
+    assert toolset.schemas()[0]["function"]["name"] == "move_by"
+    result = toolset.execute(
+        _call("move_by", deltas={"z": 0.004, "rz": 0.02}),
+        Observation(state={"joint_pos": np.zeros(6), "eef_state": np.zeros(7)}),
+    )
+    assert result.chunk is not None and len(result.chunk.actions) == 3
+    np.testing.assert_allclose(
+        np.sum([action.data for action in result.chunk.actions], axis=0),
+        [0, 0, 0.004, 0, 0, 0.02, 0],
+    )
+
+
+def test_absolute_euler_pose_is_still_rejected() -> None:
+    pose = Box(
+        shape=(6,), low=-np.ones(6), high=np.ones(6),
+        semantics=ActionSemantics("eef_abs_pose", rotation_repr="euler_xyz"),
+    )
+    with pytest.raises(ToolsetError, match="rotation_repr"):
+        build_toolset(pose, ObservationSpace(), control_hz=10.0)
+
+
 def test_chunk_final_metadata_tagged_on_last_action() -> None:
     result = _execute_absolute(0.5, current=0.0)
     assert result.chunk is not None

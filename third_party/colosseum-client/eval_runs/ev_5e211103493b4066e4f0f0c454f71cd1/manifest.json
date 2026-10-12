@@ -1,0 +1,44 @@
+{
+  "assignment": {
+    "id": "ev_5e211103493b4066e4f0f0c454f71cd1",
+    "robot_id": "so101",
+    "track": "open",
+    "task": {
+      "id": "",
+      "robot_id": "so101",
+      "instruction": "Pick up the red block",
+      "setup": "magiclab",
+      "success_criteria": "Operator A/B preference",
+      "partial_success_criteria": "0 = no progress; 100 = complete",
+      "max_steps": 800,
+      "cameras": [
+        "head_image",
+        "left_image"
+      ]
+    },
+    "scene": "magiclab",
+    "evaluator": "",
+    "inference_mode": "local",
+    "institution": "NUS",
+    "test": false,
+    "recording": true,
+    "state": "pending",
+    "runs": [
+      {
+        "id": "run_7dfde08b3447db5842fe4a5060a9c89e",
+        "side": "A",
+        "state": "assigned",
+        "plans": 0
+      },
+      {
+        "id": "run_a3a3a9fb6e63bd0277d4263a66e9709c",
+        "side": "B",
+        "state": "assigned",
+        "plans": 0
+      }
+    ],
+    "result": null
+  },
+  "outcomes": {},
+  "uploaded": []
+}

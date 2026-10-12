@@ -10,11 +10,17 @@ requires-python = ">=3.12"
 dependencies = [
   "inspect-robots>=0.58",
   "inspect-robots-so101[lerobot] @ git+https://github.com/robocurve/inspect-robots-so101@096d89e12a9e31228fa57a7e5b7d236b09f3db6e",
+  "placo>=0.9.6,<0.9.16",
+  "cmeel-urdfdom>=4,<5",
+  "cmeel-tinyxml2<11",
   "pyrealsense2==2.58.4.10922",
+  "pyarrow>=15",
+  "imageio-ffmpeg>=0.5",
 ]
 
 [project.entry-points."inspect_robots.embodiments"]
 so101_configured = "_run_so101:configured_so101"
+so101_eef_configured = "_run_so101:configured_so101_eef"
 
 [tool.setuptools]
-py-modules = ["_run_so101", "_so101_motion"]
+py-modules = ["_run_so101", "_so101_motion", "_so101_eef"]

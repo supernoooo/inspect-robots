@@ -1,5 +1,7 @@
 # Colosseum bridge
 
+SO-101 的 6 维、10 Hz、双相机配置与命令见 [SO-101 评测流水线](../_so101_instructions/COLOSSEUM.md)。
+
 这里保存了从本机 `colosseum-client` 和 `colosseum-policy-server` 复制的源码、
 配置示例、文档和测试。各项目的 `VENDORED.json` 记录来源 commit。原项目、虚拟环境、
 Git 历史、真实 token、local 配置和评测录制没有复制。

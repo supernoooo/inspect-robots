@@ -423,8 +423,14 @@ class ReviewStore:
             )
             for camera in context.get("camera_map", _CAMERAS):
                 if camera in _CAMERAS:
+                    label = (
+                        "wrist_image"
+                        if context.get("robot_type") == "so101"
+                        and context.get("camera_map", {}).get(camera) == "wrist"
+                        else camera
+                    )
                     parts.append(
-                        f'<div><div>{camera}</div><video data-side="{side}" '
+                        f'<div><div>{_escape(label)}</div><video data-side="{side}" '
                         f'src="/video/{evaluation_id}/{run_id}/{camera}" controls muted '
                         'preload="none"></video></div>'
                     )

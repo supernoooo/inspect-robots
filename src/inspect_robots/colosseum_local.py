@@ -61,7 +61,8 @@ def _catalog(config: Any, options: Any, names: list[str] | None) -> list[dict[st
     if not options.runtime_config:
         raise ValueError("--runtime-config is required for unfinished local runs")
     catalog = bridge.read_catalog(
-        options.runtime_config, control_hz=bridge.client_control_hz(config)
+        options.runtime_config, control_hz=bridge.client_control_hz(config),
+        robot_type=config.robot_type,
     )
     if names is None:
         available = set()
@@ -82,7 +83,7 @@ def _catalog(config: Any, options: Any, names: list[str] | None) -> list[dict[st
         if len(matches) != 1:
             raise ValueError(f"Local model {name} needs exactly one runtime entry")
         # Every selected model must have credentials before either arm is initialized.
-        bridge.validate_catalog_keys(config, matches)
+        bridge.validate_catalog_keys(config, matches, bridge.native_policy_options(options))
         selected.extend(matches)
     return selected
 
@@ -91,7 +92,8 @@ def _validate_native(options: Any, task: dict[str, Any], root: Path, config: Any
     from inspect_robots.cli import _parse_kvs
 
     preview = bridge.native_args(
-        options, task, root / "preview", control_hz=bridge.client_control_hz(config)
+        options, task, root / "preview", control_hz=bridge.client_control_hz(config),
+        robot_type=config.robot_type,
     )
     settings = _parse_kvs(preview.policy_args)
     invalid = set(settings) - bridge._AGENT_OPTIONS
@@ -145,8 +147,7 @@ def run_local_pair(config: Any, options: Any) -> int:
     from colosseum_client.evaluation import api_url, save
     from colosseum_client.lerobot_export import export_trial
 
-    if config.robot_type != "yam" or set(config.cameras) - set(bridge._CAMERAS):
-        raise ValueError("Local pair requires Yam and standard recording cameras")
+    bridge.camera_map(config)
     if not config.recording:
         raise ValueError("Local pair requires recording: true")
     if options.excel:
@@ -232,7 +233,7 @@ def run_local_pair(config: Any, options: Any) -> int:
         assignment = {
             "id": evaluation_id,
             "state": "local",
-            "robot_id": "yam",
+            "robot_id": config.robot_type,
             "track": "open",
             "inference_mode": "inspect-local",
             "test": config.test,
@@ -261,7 +262,8 @@ def run_local_pair(config: Any, options: Any) -> int:
             "outcomes": {},
             "created": created,
             "submission_deferred": bool(options.defer_submit),
-            "task_id": "inspect-yam-" + hashlib.sha256(instruction.encode()).hexdigest()[:12],
+            "task_id": "inspect-" + config.robot_type + "-"
+            + hashlib.sha256(instruction.encode()).hexdigest()[:12],
         }
         save(manifest, local)
     if options.dry_run:
@@ -325,7 +327,7 @@ def run_local_pair(config: Any, options: Any) -> int:
             path,
             list(context["camera_map"]),
             fps=context["fps"],
-            robot_type="yam",
+            robot_type=context["robot_type"],
             task=assignment["task"]["instruction"],
             metadata={
                 "assignment_id": assignment["id"],

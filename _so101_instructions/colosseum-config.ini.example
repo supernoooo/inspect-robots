@@ -1,0 +1,24 @@
+[defaults]
+policy = agent
+embodiment = so101_eef_configured
+scorer = episode_length
+store_frames = true
+
+[embodiment.args]
+# Replace with this rig's existing calibrated device paths and ID.
+port = /dev/serial/by-id/YOUR_FOLLOWER_ARM
+robot_id = follower_arm
+calibration_dir = /absolute/path/to/so_follower/calibration
+camera_device = /dev/v4l/by-id/YOUR_WRIST_CAMERA-video-index0
+camera_name = wrist
+head_camera_name = head
+head_camera_serial = YOUR_REALSENSE_SERIAL
+urdf_path = /absolute/path/to/so101_new_calib.urdf
+control_hz = 10
+use_degrees = true
+joints_are_delta = false
+capture_home = true
+return_home = true
+
+[policy.args]
+images = always

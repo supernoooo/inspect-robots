@@ -36,7 +36,9 @@ _PUBLIC_FIELDS = (
     "max_horizon",
 )
 _CAMERAS = {"head_image": "top_cam", "left_image": "left_cam", "right_image": "right_cam"}
+_SO101_CAMERA_ROLES = frozenset({"head_image", "left_image"})
 _JOINT_COMMAND_INFO_KEY = "yam_joint_command"
+_SO101_COMMAND_INFO_KEY = "so101_joint_command"
 _LLM_MODELS = frozenset({"grok-4.7", "gpt-6-astra", "claude-opus-5-5"})
 _PROVIDERS = {
     "gpt-": ("openai", "openai", "OPENAI_API_KEY", "responses"),
@@ -55,7 +57,36 @@ _AGENT_OPTIONS = {
     "transcript_echo",
     "depth",
     "prior_learnings",
+    "claude_command",
+    "claude_timeout_s",
 }
+
+
+class InterruptedTrialError(RuntimeError):
+    """A Router trial that cannot be safely replayed with the same run ID."""
+
+
+class NativeTrialFailedError(RuntimeError):
+    """An Inspect trial ended without a complete native recording."""
+
+
+def camera_map(config: Any) -> dict[str, str]:
+    """Map Colosseum camera names to the native embodiment's camera names."""
+    if config.robot_type == "so101":
+        if set(config.cameras) - _SO101_CAMERA_ROLES or any(
+            not isinstance(source, str) or not source.strip()
+            for source in config.cameras.values()
+        ) or len(set(config.cameras.values())) != len(config.cameras):
+            raise ValueError("SO101 requires distinct native camera names for supported roles")
+        return dict(config.cameras)
+    if config.robot_type != "yam" or set(config.cameras) - set(_CAMERAS):
+        raise ValueError("Native bridge requires YAM or SO101 with supported camera names")
+    return {name: _CAMERAS[name] for name in config.cameras}
+
+
+def action_dim(robot_type: str) -> int:
+    """Return the registered joint-position contract size for a robot type."""
+    return {"yam": 14, "so101": 6}[robot_type]
 
 
 def add_parser(sub: Any) -> None:
@@ -156,14 +187,16 @@ def public_model(model: dict[str, Any]) -> dict[str, Any]:
 
 
 def client_control_hz(config: Any) -> int:
-    """Use the Client's nominal control frequency for execution and recording."""
+    """Validate the Client's nominal frequency for local trials and previews."""
     hz = config.control_hz
     if type(hz) is not int or hz <= 0:
         raise ValueError("Client control_hz must be a positive integer")
     return hz
 
 
-def read_catalog(path: str, *, control_hz: int | None = None) -> list[dict[str, Any]]:
+def read_catalog(
+    path: str, *, control_hz: int | None = None, robot_type: str = "yam"
+) -> list[dict[str, Any]]:
     """Read registered cloud models from the copied Policy Server configuration."""
     import yaml
     from colosseum_policy_server.backends.base import LocalModel
@@ -190,8 +223,11 @@ def read_catalog(path: str, *, control_hz: int | None = None) -> list[dict[str, 
         LocalModel.from_mapping(model)  # Validate against the copied Server's model contract.
         if model.get("endpoint") != "inprocess://inspect-agent":
             raise ValueError("LLM catalog entry must use endpoint: inprocess://inspect-agent")
-        if model["action_space"] != "joint_position" or model["action_dim"] != 14:
-            raise ValueError("This bridge currently supports YAM 14-D joint_position only")
+        if (
+            model["action_space"] != "joint_position"
+            or model["action_dim"] != action_dim(robot_type)
+        ):
+            raise ValueError(f"{robot_type} requires {action_dim(robot_type)}-D joint_position")
         if type(model["control_hz"]) is not int or model["control_hz"] <= 0:
             raise ValueError("Registered model control_hz must be a positive integer")
         if control_hz is not None and model["control_hz"] != control_hz:
@@ -206,18 +242,31 @@ def read_catalog(path: str, *, control_hz: int | None = None) -> list[dict[str, 
         if not any(model["name"].startswith(prefix) for prefix in _PROVIDERS):
             raise ValueError("Unsupported LLM model name in catalog")
         merged = {**shared, **model.get("backend_options", {})}
-        if merged.get("robot_type", "yam") != "yam":
-            raise ValueError("Native bridge catalog must target robot_type: yam")
+        if merged.get("robot_type", robot_type) != robot_type:
+            raise ValueError(f"Native bridge catalog must target robot_type: {robot_type}")
         models.append({**model, "bridge_options": merged})
     if not models:
         raise ValueError("Runtime config has no LLM models")
     return models
 
 
-def validate_catalog_keys(config: Any, catalog: list[dict[str, Any]]) -> None:
+def native_policy_options(options: argparse.Namespace) -> dict[str, Any]:
+    """Read native policy overrides before selecting or requesting a model."""
+    from inspect_robots.cli import _parse_kvs, build_parser
+
+    tail = list(options.inspect_args)
+    if tail[:1] == ["--"]:
+        tail.pop(0)
+    return _parse_kvs(build_parser().parse_args(["run", *tail]).policy_args)
+
+
+def validate_catalog_keys(
+    config: Any, catalog: list[dict[str, Any]], overrides: dict[str, Any] | None = None
+) -> None:
     """Validate API keys/account logins and URLs before requesting an assignment."""
     from colosseum_client.llm_credentials import API_URLS
 
+    overrides = overrides or {}
     eligible = []
     for model in catalog:
         provider = next(
@@ -229,6 +278,11 @@ def validate_catalog_keys(config: Any, catalog: list[dict[str, Any]]) -> None:
         declared = config.llm_api_base_urls.get(provider, API_URLS[provider]).rstrip("/")
         if declared != model["url"].rstrip("/"):
             raise ValueError(f"llm_api_base_urls.{provider} must match catalog URL {model['url']}")
+        if (
+            config.robot_type == "so101"
+            and model["url"].rstrip("/") != API_URLS[provider]
+        ):
+            raise ValueError(f"SO101 {provider} inference requires the official API URL")
         if account:
             from inspect_robots_agent._claude_code import ClaudeCodeClient
 
@@ -236,8 +290,14 @@ def validate_catalog_keys(config: Any, catalog: list[dict[str, Any]]) -> None:
                 raise ValueError("Claude Code login cannot execute a relay-registered model")
             client = ClaudeCodeClient(
                 model["name"],
-                command=model["bridge_options"].get("claude_command"),
-                timeout_s=model["bridge_options"].get("claude_timeout_s", 120),
+                command=(
+                    overrides.get("claude_command")
+                    or model["bridge_options"].get("claude_command")
+                    or os.environ.get("SO101_CLAUDE_COMMAND")
+                ),
+                timeout_s=overrides.get(
+                    "claude_timeout_s", model["bridge_options"].get("claude_timeout_s", 120)
+                ),
                 env=account_environment(config),
             )
             client.close()
@@ -275,6 +335,68 @@ def validate_assigned_llm(identity: dict[str, Any]) -> None:
         )
 
 
+def match_runtime_model(
+    identity: dict[str, Any], catalog: list[dict[str, Any]], config: Any
+) -> dict[str, Any]:
+    """Bind a Router model to a local inference endpoint before opening hardware."""
+    matches = [model for model in catalog if public_model(model) == public_model(identity)]
+    if len(matches) == 1:
+        return matches[0]
+    name = identity.get("name", "")
+    candidates = [model for model in catalog if model["name"] == name]
+    if len(candidates) == 1:
+        router = public_model(identity)
+        local = public_model(candidates[0])
+        # A SO-101 Router assignment controls the execution rate. The local
+        # catalog selects the credentialed inference endpoint, which can be
+        # the official provider even when Router registered a relay URL.
+        contract_fields = (
+            "model_type", "name", "revision", "action_space", "action_dim", "max_horizon"
+        )
+        if getattr(config, "robot_type", None) == "so101" and all(
+            router.get(field) == local.get(field) for field in contract_fields
+        ):
+            from colosseum_client.llm_credentials import API_URLS
+
+            provider = next(
+                value[0] for prefix, value in _PROVIDERS.items() if name.startswith(prefix)
+            )
+            official_url = API_URLS[provider].rstrip("/")
+            if (
+                type(router.get("control_hz")) is int
+                and router["control_hz"] > 0
+                and local["url"].rstrip("/") == official_url
+                and config.llm_api_base_urls.get(provider, official_url).rstrip("/")
+                == official_url
+                and (
+                    config.llm_api_keys.get(provider)
+                    or (
+                        provider == "anthropic"
+                        and config.llm_account_logins.get("anthropic") == "claude-code"
+                    )
+                )
+            ):
+                return {**candidates[0], "control_hz": router["control_hz"]}
+        if name.startswith("claude-") and config.llm_account_logins:
+            raise ValueError(
+                "Router assigned a Claude model that does not match the account-login "
+                "catalog. Register/enable the exact official Anthropic URL, model name "
+                "and revision on Router; Claude Code login cannot replace a relay key."
+            )
+        differences = [
+            f"{field}: Router={router.get(field)!r}, runtime={local.get(field)!r}"
+            for field in _PUBLIC_FIELDS
+            if field != "url" and router.get(field) != local.get(field)
+        ]
+        if router.get("url") != local.get("url"):
+            differences.insert(0, "url differs")
+        raise ValueError(
+            f"Router model {name!r} differs from the runtime catalog: "
+            + "; ".join(differences)
+        )
+    raise ValueError("Router model has no unique matching entry in runtime config")
+
+
 def make_agent(model: dict[str, Any], config: Any, overrides: dict[str, Any]) -> Any:
     """Construct the exact assigned API policy without writing credentials to logs."""
     from inspect_robots.registry import resolve
@@ -289,12 +411,18 @@ def make_agent(model: dict[str, Any], config: Any, overrides: dict[str, Any]) ->
     invalid = set(overrides) - _AGENT_OPTIONS
     if invalid:
         raise ValueError(f"Unsupported native -P options: {', '.join(sorted(invalid))}")
-    options = model["bridge_options"]
-    kwargs = {k: v for k, v in options.items() if k in _AGENT_OPTIONS}
+    options = {**model["bridge_options"], **overrides}
+    kwargs = {
+        k: v for k, v in options.items()
+        if k in _AGENT_OPTIONS and k not in {"claude_command", "claude_timeout_s"}
+    }
     kwargs.setdefault("max_speed_frac", 0.05)
     kwargs.setdefault("max_llm_calls", 60)
     kwargs.setdefault("images", "always")
-    kwargs.update(overrides)
+    kwargs.update({
+        k: v for k, v in overrides.items()
+        if k not in {"claude_command", "claude_timeout_s"}
+    })
     wire = kwargs.pop("wire", "claude-code" if account else wire)
     if account:
         if wire != "claude-code":
@@ -307,7 +435,9 @@ def make_agent(model: dict[str, Any], config: Any, overrides: dict[str, Any]) ->
             model=f"anthropic/{model['name']}",
             wire="claude-code",
             env=account_environment(config),
-            claude_command=options.get("claude_command"),
+            claude_command=(
+                options.get("claude_command") or os.environ.get("SO101_CLAUDE_COMMAND")
+            ),
             claude_timeout_s=options.get("claude_timeout_s", 120),
             wire_capture=False,
             **kwargs,
@@ -498,16 +628,26 @@ class ReportingPolicy:
         """Reject incompatible native embodiments before any reset or policy action."""
         model = self.session.preparation["model"]
         semantics = info.action_space.semantics
+        so101_eef = (
+            self.robot_config.robot_type == "so101"
+            and self.control_mode == "eef_delta_pose"
+            and semantics is not None
+            and semantics.rotation_repr == "axis_angle"
+            and semantics.frame == "base"
+            and info.action_space.dim == 7
+            and model["action_dim"] == 6
+        )
         if (
             semantics is None
             or semantics.control_mode != self.control_mode
-            or self.control_mode not in {"joint_pos", "eef_abs_pose"}
+            or self.control_mode not in {"joint_pos", "eef_abs_pose", "eef_delta_pose"}
             or model["action_space"] != "joint_position"
-            or info.action_space.dim != model["action_dim"]
+            or (not so101_eef and info.action_space.dim != model["action_dim"])
+            or (self.control_mode == "eef_delta_pose" and not so101_eef)
             or info.control_hz != model["control_hz"]
         ):
             raise ValueError(
-                "Assigned model requires 14-D joint execution at its registered frequency; "
+                "Assigned model requires joint execution at its registered frequency; "
                 "native control must match the selected joint or EEF interface"
             )
         if bool(info.is_simulated) != self.robot_config.test:
@@ -515,13 +655,29 @@ class ReportingPolicy:
         available = {camera.name for camera in info.observation_space.cameras}
         if set(self.cameras.values()) - available:
             raise ValueError("Native embodiment is missing mapped recording cameras")
-        self.agent.bind(
-            dataclasses.replace(
+        if so101_eef:
+            # Let the agent plan exactly as many smooth steps as the Router can
+            # accept. A longer target must fail before moving, never be silently
+            # cut after the agent has committed to a destination.
+            bound = dataclasses.replace(
+                info,
+                action_space=dataclasses.replace(
+                    info.action_space,
+                    semantics=dataclasses.replace(
+                        semantics, max_chunk_steps=model["max_horizon"]
+                    ),
+                ),
+                docs=(info.docs or "") + "\nColosseum permits up to the registered "
+                "max_horizon steps per EEF trajectory. Longer targets are rejected "
+                "before any motion.",
+            )
+        else:
+            bound = dataclasses.replace(
                 info,
                 docs=(info.docs or "") + "\nColosseum action chunks may be truncated to the "
                 "registered max_horizon; use the next measured state to replan.",
             )
-        )
+        self.agent.bind(bound)
         self.session.ready()
 
     def act(self, observation: Any) -> Any:
@@ -535,6 +691,9 @@ class ReportingPolicy:
         if chunk.control_hz is not None and chunk.control_hz != model["control_hz"]:
             raise ValueError("Agent action chunk frequency differs from the registered model")
         if len(chunk.actions) > model["max_horizon"]:
+            if (getattr(self.robot_config, "robot_type", None) == "so101"
+                    and self.control_mode == "eef_delta_pose"):
+                raise ValueError("SO101 EEF trajectory exceeds the Router max_horizon")
             chunk = dataclasses.replace(chunk, actions=tuple(chunk.actions[: model["max_horizon"]]))
         return chunk
 
@@ -575,6 +734,38 @@ class CaptureClockEmbodiment:
         return dataclasses.replace(result, observation=self.stamp(result.observation))
 
 
+class CaptureSO101Embodiment(CaptureClockEmbodiment):
+    """Capture the upstream SO-101 driver's accepted command for each step."""
+
+    def step(self, action: Any) -> Any:
+        """Capture the accepted target without changing the upstream motor method."""
+        accepted: np.ndarray | None = None
+        driver = getattr(self.embodiment, "_arm", self.embodiment)
+        original = driver._send
+        prior = driver.__dict__.get("_send")
+
+        def capture(command: Any) -> Any:
+            nonlocal accepted
+            sent = original(command)
+            accepted = np.asarray(sent, dtype=np.float64).copy()
+            return sent
+
+        driver._send = capture
+        try:
+            result = self.embodiment.step(action)
+        finally:
+            if prior is None:
+                del driver._send
+            else:
+                driver._send = prior
+        if accepted is None or accepted.shape != (6,) or not np.isfinite(accepted).all():
+            raise ValueError("SO101 driver did not return a valid accepted motor command")
+        result = dataclasses.replace(
+            result, info={**result.info, _SO101_COMMAND_INFO_KEY: accepted}
+        )
+        return dataclasses.replace(result, observation=self.stamp(result.observation))
+
+
 class RecordingSink(NullSink):
     """Stream executed Inspect transitions into the existing Colosseum recorder."""
 
@@ -604,17 +795,24 @@ class RecordingSink(NullSink):
             self.recorder = TrialRecorder(self.path, list(self.cameras))
 
     def observation(self, native: Any) -> Any:
-        """Split measured YAM state; never manufacture missing joint or gripper data."""
+        """Split measured native state; never manufacture missing motor data."""
         state = np.asarray(native.state.get("joint_pos"), dtype=np.float64)
-        if state.shape != (14,) or not np.isfinite(state).all():
-            raise ValueError("Recording requires measured 14-D YAM joint_pos state")
-        if np.any(state[[6, 13]] < 0) or np.any(state[[6, 13]] > 1):
-            raise ValueError("YAM gripper state must be normalized 0 closed, 1 open")
+        robot_type = getattr(self.config, "robot_type", "yam")
+        if state.shape != (action_dim(robot_type),) or not np.isfinite(state).all():
+            raise ValueError(f"Recording requires measured {robot_type} joint_pos state")
         images = {name: native.images[source] for name, source in self.cameras.items()}
+        if robot_type == "so101":
+            if not 0 <= state[5] <= 100:
+                raise ValueError("SO101 gripper state must be in [0, 100]")
+            joints, gripper = state[:5], state[5:]
+        else:
+            if np.any(state[[6, 13]] < 0) or np.any(state[[6, 13]] > 1):
+                raise ValueError("YAM gripper state must be normalized 0 closed, 1 open")
+            joints, gripper = state[[*range(6), *range(7, 13)]], state[[6, 13]]
         return SimpleNamespace(
             images=images,
-            joints=state[[*range(6), *range(7, 13)]],
-            gripper=state[[6, 13]],
+            joints=joints,
+            gripper=gripper,
             cartesian_position=np.empty(0),
         )
 
@@ -623,7 +821,13 @@ class RecordingSink(NullSink):
         if t != self.frame_count:
             raise ValueError("Inspect control steps are not contiguous")
         recorded_action = action.data
-        if self.control_mode == "eef_abs_pose":
+        if getattr(self.config, "robot_type", "yam") == "so101":
+            recorded_action = np.asarray(result.info.get(_SO101_COMMAND_INFO_KEY), dtype=np.float64)
+            if recorded_action.shape != (6,) or not np.isfinite(recorded_action).all():
+                raise ValueError("SO101 step has no valid accepted motor command")
+            if not 0 <= recorded_action[5] <= 100:
+                raise ValueError("SO101 accepted gripper command must be in [0, 100]")
+        elif self.control_mode == "eef_abs_pose":
             recorded_action = np.asarray(result.info.get(_JOINT_COMMAND_INFO_KEY), dtype=np.float64)
             if recorded_action.shape != (14,) or not np.isfinite(recorded_action).all():
                 raise ValueError("EEF step has no valid post-IK joint command; cannot record it")
@@ -677,7 +881,8 @@ class RecordingSink(NullSink):
 
 
 def native_args(
-    options: argparse.Namespace, task: dict[str, Any], path: Path, *, control_hz: int = 30
+    options: argparse.Namespace, task: dict[str, Any], path: Path, *, control_hz: int = 30,
+    robot_type: str = "yam",
 ) -> Any:
     """Use the standard run parser while binding task, identity and horizon to Router."""
     from inspect_robots.cli import _check_shared_run_conflicts, _parse_kvs, build_parser
@@ -700,7 +905,22 @@ def native_args(
         raise ValueError("Native --max-steps must match the Router task horizon")
     args.instruction, args.max_steps, args.epochs = task["instruction"], task["max_steps"], 1
     args.policy = "agent"
-    args.embodiment = args.embodiment or "yam_arms"
+    from inspect_robots.defaults import load_defaults
+
+    env = dict(os.environ)
+    if args.config:
+        env["INSPECT_ROBOTS_CONFIG"] = str(Path(args.config).expanduser().resolve())
+    configured = load_defaults(env)
+    args.embodiment = args.embodiment or (
+        configured.embodiment
+        if robot_type == "so101"
+        and configured.embodiment in {"so101_configured", "so101_eef_configured"}
+        else "so101_configured" if robot_type == "so101" else "yam_arms"
+    )
+    if robot_type == "so101" and args.embodiment not in {
+        "so101_configured", "so101_eef_configured"
+    }:
+        raise ValueError("SO101 bridge requires a configured SO101 joint or EEF embodiment")
     args.scorer = args.scorer or "episode_length"
     args.grader = args.grader or "none"  # Colosseum collects the actual human scores.
     args.log_dir = str(path / "inspect")
@@ -710,19 +930,34 @@ def native_args(
         args.rerun = False
     if args.rerun_save is None:
         args.rerun_save = False
-    if args.max_action_delta is None:
+    if args.max_action_delta is None and robot_type == "yam":
         args.max_action_delta = 0.05
     if args.fail_on_error is None:
         args.fail_on_error = 1
     eef = args.embodiment == "yam_eef"
-    from inspect_robots.defaults import load_defaults
-
-    env = dict(os.environ)
-    if args.config:
-        env["INSPECT_ROBOTS_CONFIG"] = str(Path(args.config).expanduser().resolve())
-    configured = load_defaults(env)
     if configured.policy_args_owner == "agent" and "wire" in configured.policy_args:
         args.policy_args = [f"wire={configured.policy_args['wire']}", *(args.policy_args or [])]
+    if robot_type == "so101":
+        inherited = (
+            configured.embodiment_args
+            if configured.embodiment_args_owner == args.embodiment else {}
+        )
+        overrides = _parse_kvs(args.embodiment_args)
+        settings = {**inherited, **overrides}
+        if settings.get("use_degrees", True) is not True:
+            raise ValueError("SO101 Colosseum export requires use_degrees=true")
+        if settings.get("joints_are_delta", False) is not False:
+            raise ValueError("SO101 Colosseum requires absolute joint targets")
+        if overrides.get("control_hz", control_hz) != control_hz:
+            raise ValueError("Explicit native control_hz must match the assigned frequency")
+        args.embodiment_args = [
+            f"{k}={v}" for k, v in {
+                "control_hz": control_hz, "use_degrees": True,
+                "joints_are_delta": False, **overrides,
+            }.items()
+        ]
+        _check_shared_run_conflicts(args)
+        return args
     inherited: dict[str, Any] = {}
     if eef and configured.embodiment_args_owner in {"yam_arms", "yam_eef"}:
         inherited = configured.embodiment_args
@@ -762,13 +997,6 @@ def execute_trial(
 
     from inspect_robots.cli import _cmd_run, _parse_kvs
 
-    hz = client_control_hz(config)
-    args = native_args(options, assignment["task"], path, control_hz=hz)
-    control_mode = "eef_abs_pose" if args.embodiment == "yam_eef" else "joint_pos"
-    if args.no_prompt and not config.test:
-        raise ValueError("Physical bridge evaluations require native operator prompts")
-    if args.config:
-        os.environ["INSPECT_ROBOTS_CONFIG"] = str(Path(args.config).expanduser().resolve())
     local_selection = session_factory is not None
     session = (session_factory or RouterSession)(config, assignment, trial)
     sink: RecordingSink | None = None
@@ -787,25 +1015,36 @@ def execute_trial(
         assigned[trial["id"]] = {"side": trial["side"], "model": recorded}
         save(descriptors, assigned)
         validate_assigned_llm(identity)
-        matches = [model for model in catalog if public_model(model) == public_model(identity)]
-        if len(matches) != 1:
-            if identity.get("name", "").startswith("claude-") and config.llm_account_logins:
-                raise ValueError(
-                    "Router assigned a Claude model that does not match the account-login "
-                    "catalog. Register/enable the exact official Anthropic URL, model name "
-                    "and revision on Router; Claude Code login cannot replace a relay key."
-                )
-            raise ValueError("Router model has no unique matching entry in runtime config")
-        model = matches[0]
+        print(
+            f"Router allocated {trial['side']}: {recorded['name']} "
+            f"(revision {recorded.get('revision', 'unspecified')}, "
+            f"{recorded.get('control_hz', 'unspecified')} Hz)",
+            flush=True,
+        )
+        model = match_runtime_model(identity, catalog, config)
+        hz = identity["control_hz"] if config.robot_type == "so101" else client_control_hz(config)
+        args = native_args(
+            options, assignment["task"], path, control_hz=hz,
+            robot_type=config.robot_type,
+        )
+        control_mode = (
+            "eef_abs_pose" if args.embodiment == "yam_eef"
+            else "eef_delta_pose" if args.embodiment == "so101_eef_configured"
+            else "joint_pos"
+        )
+        if args.no_prompt and not config.test:
+            raise ValueError("Physical bridge evaluations require native operator prompts")
+        if args.config:
+            os.environ["INSPECT_ROBOTS_CONFIG"] = str(Path(args.config).expanduser().resolve())
         agent = make_agent(model, config, _parse_kvs(args.policy_args))
-        cameras = {name: _CAMERAS[name] for name in config.cameras}
+        cameras = camera_map(config)
         if set(assignment["task"]["cameras"]) - set(cameras):
             raise ValueError("Client recording cameras do not cover the Router task")
         save(path / "policy.json", {"run_id": trial["id"], "model": identity})
         save(
             path / "recording-context.json",
             {
-                "robot_type": "yam",
+                "robot_type": config.robot_type,
                 "fps": hz,
                 "test": config.test,
                 "action_space": "joint_position",
@@ -819,31 +1058,41 @@ def execute_trial(
                     and config.llm_account_logins.get("anthropic")
                     else "api-key"
                 ),
+                "native_llm_url": model["url"],
                 "native_embodiment": args.embodiment,
                 "native_control_mode": control_mode,
                 "capture_timestamp_semantics": (
                     "monotonic native observation receipt before inference"
                 ),
                 "action_recording": (
-                    "sent normalized joint commands after EEF IK and joint clipping"
+                    "accepted motor commands after driver limiting"
+                    if config.robot_type == "so101"
+                    else "sent normalized joint commands after EEF IK and joint clipping"
                     if control_mode == "eef_abs_pose"
                     else "executed post-guardrail commands"
                 ),
                 "joint_command_info_key": (
-                    _JOINT_COMMAND_INFO_KEY if control_mode == "eef_abs_pose" else None
+                    _SO101_COMMAND_INFO_KEY if config.robot_type == "so101"
+                    else _JOINT_COMMAND_INFO_KEY if control_mode == "eef_abs_pose" else None
                 ),
             },
         )
         sink = RecordingSink(path, config, session, cameras, control_mode=control_mode)
         policy = ReportingPolicy(agent, session, config, cameras, control_mode=control_mode)
-        code = _cmd_run(
-            args,
-            policy_override=policy,
-            extra_sinks=[sink],
-            embodiment_wrapper=CaptureClockEmbodiment,
-        )
+        try:
+            code = _cmd_run(
+                args,
+                policy_override=policy,
+                extra_sinks=[sink],
+                embodiment_wrapper=(
+                    CaptureSO101Embodiment if config.robot_type == "so101"
+                    else CaptureClockEmbodiment
+                ),
+            )
+        except Exception as exc:
+            raise NativeTrialFailedError(f"Native Inspect trial failed: {exc}") from exc
         if code != 0 or sink.log is None or sink.log.status != "success" or sink.frame_count == 0:
-            raise RuntimeError(
+            raise NativeTrialFailedError(
                 "Inspect trial failed or had no executed steps; result was not submitted"
             )
         # Preserve the settings actually used, rather than the current config at upload time.
@@ -857,6 +1106,7 @@ def execute_trial(
                 if key
                 in {
                     "eef_orientation",
+                    "use_degrees",
                     "control_hz",
                     "control_interface",
                     "joints_are_delta",
@@ -907,7 +1157,7 @@ def validate_assignment(config: Any, assignment: dict[str, Any]) -> None:
     safe_id(assignment["id"])
     if (
         assignment.get("inference_mode") != "local"
-        or assignment.get("robot_id", "yam") != "yam"
+        or assignment.get("robot_id", "yam") != config.robot_type
         or bool(assignment.get("test", False)) != config.test
         or bool(assignment.get("recording", True)) != config.recording
     ):
@@ -1067,7 +1317,7 @@ def process_assignment(
             print(f"\n{trial['side']}: restore the initial scene before the native Inspect prompt.")
             execute_trial(config, assignment, trial, path, options, catalog)
         elif trial["state"] != "finished":
-            raise RuntimeError(
+            raise InterruptedTrialError(
                 "Trial is interrupted or still running; resume cannot execute it again"
             )
         if not marker.exists() or not json.loads(marker.read_text()).get("native_complete"):
@@ -1100,7 +1350,7 @@ def process_assignment(
                 path,
                 list(context["camera_map"]),
                 fps=context["fps"],
-                robot_type="yam",
+                robot_type=context["robot_type"],
                 task=task["instruction"],
                 metadata={
                     "assignment_id": assignment["id"],
@@ -1241,14 +1491,18 @@ def run(options: argparse.Namespace) -> int:
             from inspect_robots.colosseum_excel import validate_target
 
             validate_target(options.excel)
-        if config.robot_type != "yam" or set(config.cameras) - set(_CAMERAS):
-            raise ValueError("Native bridge requires robot_type: yam and standard camera names")
+        camera_map(config)
         hz = client_control_hz(config)
         catalog = (
-            read_catalog(options.runtime_config, control_hz=hz) if options.runtime_config else []
+            read_catalog(
+                options.runtime_config,
+                control_hz=None if config.robot_type == "so101" else hz,
+                robot_type=config.robot_type,
+            )
+            if options.runtime_config else []
         )
         if catalog:
-            validate_catalog_keys(config, catalog)
+            validate_catalog_keys(config, catalog, native_policy_options(options))
         if options.abort:
             if (
                 options.resume
@@ -1285,6 +1539,7 @@ def run(options: argparse.Namespace) -> int:
             },
             root / "preview",
             control_hz=hz,
+            robot_type=config.robot_type,
         )
         invalid = set(_parse_kvs(preview.policy_args)) - _AGENT_OPTIONS
         if invalid:
@@ -1308,20 +1563,21 @@ def run(options: argparse.Namespace) -> int:
             print(f"Local data: {root}")
             control = (
                 "EEF → IK → joint execution"
-                if preview.embodiment == "yam_eef"
+                if preview.embodiment in {"yam_eef", "so101_eef_configured"}
                 else "absolute joints"
             )
-            print(f"Native control: YAM {control}, {hz} Hz; cameras: " + str(_CAMERAS))
+            frequency = (
+                "Router-assigned Hz (local preview uses " + str(hz) + " Hz)"
+                if config.robot_type == "so101" else f"{hz} Hz"
+            )
+            print(
+                f"Native control: {config.robot_type} {control}, {frequency}; cameras: "
+                + str(camera_map(config))
+            )
             return 0
-        if not options.resume:
-            for path in root.glob("*/manifest.json"):
-                saved = json.loads(path.read_text())
-                if (
-                    saved.get("bridge") == "inspect-robots-v1"
-                    and not saved.get("submitted")
-                    and not saved.get("aborted")
-                ):
-                    raise ValueError(f"Resume or abort pending evaluation {path.parent.name} first")
+        # A new collection is independent of local review and of older saved
+        # assignments. The Router decides whether another /next is available;
+        # never discard or replay older artifacts to request it.
         api = EvalAPI(config)
         if options.resume:
             assignment = api.request("GET", f"/assignments/{options.resume}")
@@ -1334,7 +1590,7 @@ def run(options: argparse.Namespace) -> int:
                 raise ValueError("Instruction cannot be empty")
             scene = config.scene or (input("Scene / setup: ").strip() if track == "open" else "")
             body = {
-                "robot_id": "yam",
+                "robot_id": config.robot_type,
                 "track": track,
                 "instruction": instruction,
                 "scene": scene,
@@ -1347,7 +1603,7 @@ def run(options: argparse.Namespace) -> int:
                 "cameras": list(config.cameras),
             }
             if track == "fine-tuning":
-                body["task_id"] = select_task(api, "yam", config.test)
+                body["task_id"] = select_task(api, config.robot_type, config.test)
             assignment = api.request("POST", "/next", body)
         print(
             f"Colosseum evaluation: {assignment['id']}; use --resume {assignment['id']} to retry."
@@ -1373,6 +1629,22 @@ def run(options: argparse.Namespace) -> int:
             print(
                 "No evaluation assignment was obtained and no robot was started. "
                 "Correct the error and retry the original command.",
+                file=sys.stderr,
+            )
+        elif isinstance(exc, InterruptedTrialError):
+            print(
+                "This Router run cannot be replayed. Abort the old evaluation with "
+                f"--abort {assignment['id']} --reason 'interrupted trial', then request "
+                "a new evaluation without --resume. Saved artifacts are retained.",
+                file=sys.stderr,
+            )
+        elif isinstance(exc, NativeTrialFailedError):
+            print(
+                "The failed trial has no complete recording and cannot be replayed "
+                "from its saved run directory. After correcting the cause, run the "
+                "same command without --resume to request a new pair. Older artifacts "
+                "are retained for later review or discard; Router allocation rules "
+                "still apply.",
                 file=sys.stderr,
             )
         else:

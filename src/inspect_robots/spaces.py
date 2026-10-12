@@ -59,6 +59,13 @@ class ActionSemantics:
     entry leaves that dimension to range-based defaults. Displacement and rate
     boxes already declare per-step limits through their bounds, so declarations
     are rejected for those modes.
+
+    ``max_chunk_steps`` optionally limits one policy motion to a short number
+    of control steps before the policy receives another observation.
+
+    ``agent_eef_target`` lets an agent express absolute EEF position,
+    quaternion orientation and gripper targets while the embodiment still
+    receives bounded ``eef_delta_pose`` control steps.
     """
 
     control_mode: ControlMode
@@ -67,8 +74,18 @@ class ActionSemantics:
     frame: Frame = "base"
     dim_labels: tuple[str, ...] | None = None
     max_step: tuple[float | None, ...] | None = None
+    max_chunk_steps: int | None = None
+    agent_eef_target: bool = False
 
     def __post_init__(self) -> None:
+        if self.agent_eef_target and self.control_mode != "eef_delta_pose":
+            raise ValueError("ActionSemantics.agent_eef_target requires eef_delta_pose")
+        if self.max_chunk_steps is not None and (
+            not isinstance(self.max_chunk_steps, int)
+            or isinstance(self.max_chunk_steps, bool)
+            or self.max_chunk_steps < 1
+        ):
+            raise ValueError("ActionSemantics.max_chunk_steps must be a positive integer")
         if self.max_step is None:
             return
         for entry in self.max_step:

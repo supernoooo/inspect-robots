@@ -108,7 +108,7 @@ def import_manifest(local: dict[str, Any], run: dict[str, Any], dataset: Path) -
     return {
         "submission_id": run["id"],
         "name": f"Inspect {run['model']['name']} {local['assignment']['id']}",
-        "robot_id": "yam",
+        "robot_id": local["assignment"]["robot_id"],
         "task_id": local["task_id"],
         # API model revisions are not HF commit hashes; preserve them in colosseum.json.
         "model": {"name": run["model"]["name"], "repo_id": "", "revision": ""},
@@ -146,7 +146,7 @@ def evaluation_payload(local: dict[str, Any], folder: Path) -> dict[str, Any]:
         durations.append(float(log.get("stats", {}).get("duration_s", 0) or 0))
     scores = {side: local["outcomes"][side]["partial_success"] for side in ("A", "B")}
     return {
-        "robotId": "yam",
+        "robotId": assignment["robot_id"],
         "task": assignment["task"]["instruction"],
         "instruction": assignment["task"]["instruction"],
         "institution": assignment["institution"],
@@ -168,7 +168,8 @@ def evaluation_payload(local: dict[str, Any], folder: Path) -> dict[str, Any]:
 
 
 def _find_existing(api: LocalUploadAPI, local: dict[str, Any]) -> str | None:
-    response = api.request("GET", "/api/list_ab_evaluations?robot=yam&track=open")
+    robot = quote(local["assignment"]["robot_id"], safe="")
+    response = api.request("GET", f"/api/list_ab_evaluations?robot={robot}&track=open")
     rows = (
         response
         if isinstance(response, list)

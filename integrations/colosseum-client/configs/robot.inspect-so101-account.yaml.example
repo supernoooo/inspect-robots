@@ -1,0 +1,26 @@
+# Native Inspect hardware and EEF control are configured in .so101/config.ini.
+url: wss://YOUR_ROUTER/ws
+api_url: https://YOUR_ROUTER
+token: REPLACE_WITH_CLIENT_TOKEN
+institution: YOUR_INSTITUTION
+robot_type: so101
+track: open
+policy_server_url: ws://127.0.0.1:8000
+control_hz: 10
+max_trial_steps: 1200
+recording: true
+skip_upload: false
+test: false
+evaluation_dir: logs/colosseum/so101
+cameras:
+  head_image: front
+  left_image: wrist
+llm_api_keys:
+  openai: env:OPENAI_API_KEY
+  xai: env:XAI_API_KEY
+llm_api_base_urls:
+  openai: https://api.openai.com/v1
+  xai: https://api.x.ai/v1
+  anthropic: https://api.anthropic.com/v1
+llm_account_logins:
+  anthropic: claude-code
