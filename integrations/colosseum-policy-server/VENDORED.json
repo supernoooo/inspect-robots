@@ -1,0 +1,6 @@
+{
+  "source_directory": "/home/rc1/colosseum-policy-server",
+  "source_commit": "6a326e0c394dcb89397cfadb61108402c3ce1dac",
+  "copied_files": 90,
+  "contents": "Tracked working-tree source, examples, documentation, tests and dependency lock. No .git, virtualenv, local credentials or recordings."
+}

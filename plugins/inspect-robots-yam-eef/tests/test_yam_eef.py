@@ -6,13 +6,14 @@ import json
 
 import numpy as np
 import pytest
-
-from inspect_robots.scene import Scene
 from inspect_robots_agent._llm import ToolCall
 from inspect_robots_agent._tools import build_toolset
+
+from inspect_robots.scene import Scene
+from inspect_robots.types import Action
 from inspect_robots_yam import YamConfig
 from inspect_robots_yam.config import DEFAULT_EEF_HOME_POSE, DEFAULT_JOINT_HOME_POSE
-from inspect_robots_yam_eef import YamEEFEmbodiment
+from inspect_robots_yam_eef import JOINT_COMMAND_INFO_KEY, YamEEFEmbodiment
 
 
 class _Driver:
@@ -54,7 +55,9 @@ class _RawKinematics:
         pose[:3, 3] = [0.3, 0.0, 0.2]
         return pose
 
-    def ik(self, target: np.ndarray, init_q: np.ndarray, _max_iters: int) -> tuple[bool, np.ndarray]:
+    def ik(
+        self, target: np.ndarray, init_q: np.ndarray, _max_iters: int
+    ) -> tuple[bool, np.ndarray]:
         self.targets.append(target.copy())
         result = init_q.copy()
         result[:6] += self.joint_offset
@@ -72,7 +75,7 @@ def test_named_eef_mode_runs_ik_then_sends_joint_targets() -> None:
         rest_secs=0.1,
         driver_factory=lambda _config: driver,
         kinematics_factory=lambda _config: (left, right),
-        camera_reader=lambda _config: {name: image for name in ("top_cam", "left_cam", "right_cam")},
+        camera_reader=lambda _config: dict.fromkeys(("top_cam", "left_cam", "right_cam"), image),
         sleep_fn=lambda _seconds: None,
         clock=lambda: 0.0,
     )
@@ -122,6 +125,8 @@ def test_named_eef_mode_runs_ik_then_sends_joint_targets() -> None:
         )
         np.testing.assert_allclose(driver.commands[-1][[6, 13]], [0.2, 0.8])
         assert "eef_state" in result.observation.state
+        np.testing.assert_allclose(result.info[JOINT_COMMAND_INFO_KEY], driver.commands[-1])
+        assert result.info[JOINT_COMMAND_INFO_KEY] != proposed.chunk.actions[-1].data.tolist()
     finally:
         embodiment.close()
 
@@ -129,8 +134,52 @@ def test_named_eef_mode_runs_ik_then_sends_joint_targets() -> None:
 def test_joint_mode_cannot_be_selected_under_eef_name() -> None:
     with pytest.raises(ValueError, match="control_interface='eef_pos'"):
         YamEEFEmbodiment(control_interface="joints")
-    with pytest.raises(ValueError, match="config.control_interface='eef_pos'"):
+    with pytest.raises(ValueError, match=r"config\.control_interface='eef_pos'"):
         YamEEFEmbodiment(YamConfig())
+
+
+def test_joint_command_telemetry_is_normalized_and_not_a_stale_previous_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.types import Observation, StepResult
+    from inspect_robots_yam.embodiment import YAMEmbodiment
+
+    driver = _Driver()
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    embodiment = YamEEFEmbodiment(
+        cam_height=4,
+        cam_width=4,
+        unattended=True,
+        rest_secs=0.1,
+        gripper_open=0.04,
+        gripper_closed=0,
+        driver_factory=lambda _config: driver,
+        kinematics_factory=lambda _config: (_RawKinematics(0.05), _RawKinematics(-0.05)),
+        camera_reader=lambda _config: dict.fromkeys(("top_cam", "left_cam", "right_cam"), image),
+        sleep_fn=lambda _seconds: None,
+        clock=lambda: 0.0,
+    )
+    try:
+        observed = embodiment.reset(Scene(id="eef", instruction="move"))
+        target = observed.state["eef_state"].copy()
+        target[[6, 13]] = [0.2, 0.8]
+        result = embodiment.step(Action(target))
+        sent = np.asarray(result.info[JOINT_COMMAND_INFO_KEY])
+        np.testing.assert_allclose(sent[[6, 13]], [0.2, 0.8])
+        np.testing.assert_allclose(driver.commands[-1][[6, 13]], [0.008, 0.032])
+        np.testing.assert_allclose(sent[:6], driver.commands[-1][:6])
+        np.testing.assert_allclose(sent[7:13], driver.commands[-1][7:13])
+        monkeypatch.setattr(
+            YAMEmbodiment,
+            "step",
+            lambda self, action: StepResult(
+                Observation(), terminated=True, termination_reason="overheat"
+            ),
+        )
+        ended = embodiment.step(Action(target))
+        assert JOINT_COMMAND_INFO_KEY not in ended.info
+    finally:
+        embodiment.close()
 
 
 def test_config_object_uses_joint_home_unless_overridden() -> None:

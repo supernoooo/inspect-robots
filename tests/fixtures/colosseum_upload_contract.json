@@ -1,0 +1,482 @@
+{
+  "source": "Router GET /openapi.json; 2026-10-11",
+  "components": {
+    "schemas": {
+      "EvaluationCreateRequest": {
+        "properties": {
+          "robotId": {
+            "type": "string",
+            "title": "Robotid"
+          },
+          "task": {
+            "type": "string",
+            "title": "Task"
+          },
+          "instruction": {
+            "type": "string",
+            "title": "Instruction",
+            "default": ""
+          },
+          "institution": {
+            "type": "string",
+            "title": "Institution",
+            "default": ""
+          },
+          "scene": {
+            "type": "string",
+            "title": "Scene",
+            "default": ""
+          },
+          "date": {
+            "type": "string",
+            "title": "Date"
+          },
+          "policyA": {
+            "type": "string",
+            "title": "Policya"
+          },
+          "policyB": {
+            "type": "string",
+            "title": "Policyb"
+          },
+          "winner": {
+            "type": "string",
+            "enum": [
+              "A",
+              "B",
+              "tie"
+            ],
+            "title": "Winner"
+          },
+          "duration": {
+            "type": "string",
+            "title": "Duration"
+          },
+          "evaluator": {
+            "type": "string",
+            "title": "Evaluator"
+          },
+          "difficulty": {
+            "type": "string",
+            "title": "Difficulty",
+            "default": ""
+          },
+          "partialSuccess": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Partialsuccess",
+            "default": 0.0
+          },
+          "partialSuccessA": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Partialsuccessa",
+            "default": 0.0
+          },
+          "partialSuccessB": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Partialsuccessb",
+            "default": 0.0
+          },
+          "evalTime": {
+            "type": "string",
+            "title": "Evaltime",
+            "default": ""
+          },
+          "feedback": {
+            "type": "string",
+            "title": "Feedback",
+            "default": ""
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "clear",
+              "close",
+              "uncertain"
+            ],
+            "title": "Confidence"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "robotId",
+          "task",
+          "date",
+          "policyA",
+          "policyB",
+          "winner",
+          "duration",
+          "evaluator",
+          "confidence"
+        ],
+        "title": "EvaluationCreateRequest"
+      },
+      "EvaluationResultUpdateRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "pref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "A",
+                  "B",
+                  "tie"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pref"
+          },
+          "winner": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "A",
+                  "B",
+                  "tie"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Winner"
+          },
+          "partialSuccess": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partialsuccess"
+          },
+          "partialSuccessA": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partialsuccessa"
+          },
+          "partialSuccessB": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partialsuccessb"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "scene": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene"
+          },
+          "finalize": {
+            "type": "boolean",
+            "title": "Finalize",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "EvaluationResultUpdateRequest"
+      },
+      "ImportManifest": {
+        "properties": {
+          "submission_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,100}$",
+            "title": "Submission Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "robot_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$",
+            "title": "Robot Id"
+          },
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$",
+            "title": "Task Id"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ImportModel"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImportSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "results_file": {
+            "type": "string",
+            "enum": [
+              "eval_trials.csv",
+              "result.csv",
+              "results.csv"
+            ],
+            "title": "Results File",
+            "default": "eval_trials.csv"
+          },
+          "scoring": {
+            "type": "string",
+            "const": "score-0-4-success-4-v1",
+            "title": "Scoring",
+            "default": "score-0-4-success-4-v1"
+          },
+          "camera_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "maxProperties": 3,
+            "minProperties": 1,
+            "title": "Camera Map"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ImportFile"
+            },
+            "type": "array",
+            "maxItems": 6000,
+            "minItems": 5,
+            "title": "Files"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "submission_id",
+          "name",
+          "robot_id",
+          "task_id",
+          "model",
+          "camera_map",
+          "files"
+        ],
+        "title": "ImportManifest"
+      },
+      "ImportFile": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 300,
+            "title": "Path"
+          },
+          "size": {
+            "type": "integer",
+            "maximum": 536870912.0,
+            "minimum": 1.0,
+            "title": "Size"
+          },
+          "checksum_sha256": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9+/]{43}=$",
+            "title": "Checksum Sha256"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "checksum_sha256"
+        ],
+        "title": "ImportFile"
+      },
+      "ImportModel": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "repo_id": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?$",
+            "title": "Repo Id",
+            "default": ""
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^(?:[a-fA-F0-9]{40})?$",
+            "title": "Revision",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ImportModel"
+      },
+      "ImportSource": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "huggingface",
+              "modelscope"
+            ],
+            "title": "Provider"
+          },
+          "repo_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repo Id"
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{40}$",
+            "title": "Revision"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Path",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "repo_id",
+          "revision"
+        ],
+        "title": "ImportSource"
+      },
+      "VideoUploadRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "videos": {
+            "items": {
+              "$ref": "#/components/schemas/VideoUploadItem"
+            },
+            "type": "array",
+            "title": "Videos"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token",
+          "videos"
+        ],
+        "title": "VideoUploadRequest"
+      },
+      "VideoUploadItem": {
+        "properties": {
+          "side": {
+            "type": "string",
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Side"
+          },
+          "camera": {
+            "type": "string",
+            "enum": [
+              "top",
+              "left_wrist",
+              "right_wrist"
+            ],
+            "title": "Camera"
+          },
+          "contentType": {
+            "type": "string",
+            "title": "Contenttype",
+            "default": "video/mp4"
+          }
+        },
+        "type": "object",
+        "required": [
+          "side",
+          "camera"
+        ],
+        "title": "VideoUploadItem"
+      }
+    }
+  }
+}

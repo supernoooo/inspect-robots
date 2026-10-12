@@ -1,0 +1,6 @@
+{
+  "source_directory": "/home/rc1/colosseum-client",
+  "source_commit": "179af1b0336c9b9b661f60aba97689568ecc6d8c",
+  "copied_files": 62,
+  "contents": "Tracked working-tree source, examples, documentation, tests and dependency lock. No .git, virtualenv, local credentials or recordings."
+}

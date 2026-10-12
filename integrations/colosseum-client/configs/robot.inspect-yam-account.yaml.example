@@ -1,0 +1,32 @@
+# Used by inspect-robots colosseum; native hardware config is .yam/config.ini.
+url: wss://YOUR_ROUTER/ws
+api_url: https://YOUR_ROUTER
+token: REPLACE_WITH_CLIENT_TOKEN
+institution: YOUR_INSTITUTION
+robot_type: yam
+track: open
+# Retained for the Client BYOK config validation; bridge runs the policy in-process.
+policy_server_url: ws://127.0.0.1:8000
+control_hz: 30
+max_trial_steps: 800
+recording: true
+skip_upload: false
+test: false
+evaluation_dir: logs/colosseum
+# Names select recordings; native camera devices are configured in .yam/config.ini.
+cameras:
+  head_image: native-top-cam
+  left_image: native-left-cam
+  right_image: native-right-cam
+llm_api_keys:
+  openai: env:OPENAI_API_KEY
+  xai: env:XAI_API_KEY
+# Must match the Router registration and Policy Server catalog exactly.
+llm_api_base_urls:
+  openai: https://api.openai.com/v1
+  xai: https://api.x.ai/v1
+  anthropic: https://api.anthropic.com/v1
+
+# Native Inspect bridge only; requires an official Claude registration on Router.
+llm_account_logins:
+  anthropic: claude-code

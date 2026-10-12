@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "colosseum-policy-server"
+version = "0.2.0"
+description = "Pull-based policy inference SDK for Colosseum"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "protobuf>=6.33.5,<7",
+  "PyYAML>=6,<7",
+  "websockets>=15,<16",
+  "async-timeout>=4,<6; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["grpcio-tools>=1.66", "pytest>=8", "pytest-asyncio>=0.24"]
+demo = ["opencv-python>=4.10,<5"]
+droid = ["msgpack>=1,<2", "pyzmq>=25,<28", "scipy>=1.10,<2"]
+agent = [
+  "inspect-robots @ git+https://github.com/robocurve/inspect-robots.git@d08442a9d1f43af4658c8d71e02d461e780286e1",
+  "inspect-robots-agent @ git+https://github.com/robocurve/inspect-robots.git@d08442a9d1f43af4658c8d71e02d461e780286e1#subdirectory=plugins/inspect-robots-agent",
+]
+
+[project.entry-points."colosseum_policy_server.backends"]
+droid = "colosseum_policy_server.backends.droid:create_backend"
+inspect_agent = "colosseum_policy_server.backends.inspect_agent:create_backend"
+auto = "colosseum_policy_server.backends.auto:create_backend"
+vla = "colosseum_policy_server.backends.vla:create_backend"
+
+[project.scripts]
+colosseum-policy-test-backend = "colosseum_policy_server.local_verify:main"
+colosseum-policy-demo = "colosseum_policy_server.cli:main"
+colosseum-policy-local = "colosseum_policy_server.local_server:main"
+colosseum-policy-model = "colosseum_policy_server.model_service:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.hatch.metadata]
+allow-direct-references = true

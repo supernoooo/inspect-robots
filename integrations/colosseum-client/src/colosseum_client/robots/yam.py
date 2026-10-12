@@ -1,0 +1,585 @@
+"""Bimanual I2RT YAM / LINEAR_4310 and three RealSense cameras.
+
+Actions: left six radians, left normalized gripper, right six radians, right
+normalized gripper. Observations keep twelve joints and two grippers separate.
+SDK close releases motor torque; it is not a powered position hold.
+"""
+import asyncio
+import json
+import logging
+import select
+import sys
+import time
+import threading
+
+import numpy as np
+
+from ..robot_interface import Robot, RobotObservation
+
+log = logging.getLogger(__name__)
+CAMERAS = ('head_image', 'left_image', 'right_image')
+_CONTROL_JOIN_TIMEOUT = 5.0
+_GRIPPER_LOG_INTERVAL = 1.0
+_GRIPPER_STARTUP_TOLERANCE_RAD = .02
+
+
+def _bounds_error(message):
+    log.error('%s', message)
+    raise ValueError(message)
+
+
+def _joint_bounds_details(values, low, high):
+    return '; '.join(
+        f'{"left" if i < 6 else "right"}_joint{i % 6 + 1}: '
+        f'value={values[i]:.6f}, low={low[i]:.6f}, high={high[i]:.6f}'
+        for i in np.flatnonzero((values < low) | (values > high)))
+
+
+def _close_arm(arm):
+    """Let I2RT stop its robot loop, then join CAN workers before socket close.
+
+    The pinned I2RT DMChain discards its worker handle. Discover only workers
+    bound to this chain; do not change the SDK globally or other arms' threads.
+    """
+    chain = getattr(arm, 'motor_chain', None)
+    interface = getattr(chain, 'motor_interface', None)
+    if interface is None:
+        arm.close()
+        return
+    workers = [t for t in threading.enumerate()
+               if getattr(getattr(t, '_target', None), '__self__', None) is chain]
+    original_close = interface.close
+
+    def close_after_workers():
+        chain.running = False
+        pending = []
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(timeout=_CONTROL_JOIN_TIMEOUT)
+            if worker.is_alive():
+                pending.append(worker.name)
+        # Always attempt SDK motor/socket shutdown, even after a join timeout.
+        # A timeout remains a reported failure, never a successful teardown.
+        original_close()
+        if pending:
+            raise RuntimeError(f'I2RT CAN workers did not stop before shutdown: {pending}')
+
+    interface.close = close_after_workers
+    try:
+        arm.close()
+    finally:
+        interface.close = original_close
+
+
+def _vector(value, size, name):
+    result = np.asarray(value, dtype=np.float64)
+    if result.shape != (size,) or not np.isfinite(result).all():
+        raise ValueError(f'{name} must contain {size} finite values')
+    return result.copy()
+
+
+def _rebase_gripper_limits(arm, limits):
+    """Change only the gripper mapping while startup gripper control is passive.
+
+    I2RT stores the limits in both JointMapper and the final target clipper.
+    Update both and refresh normalized feedback atomically with its robot loop.
+    Motor offsets, directions and arm control parameters remain unchanged.
+    """
+    from i2rt.robots.utils import JointMapper
+    mapper = JointMapper(index_range_map={6: limits}, total_dofs=7)
+    with arm._command_lock, arm._state_lock:
+        if (arm._gripper_index != 6 or len(arm.motor_chain) != 7
+                or any(getattr(arm._commands, name)[6] != 0
+                       for name in ('kp', 'kd', 'torques'))):
+            raise RuntimeError('Cannot rebase gripper calibration while gripper control is active')
+        states = arm.motor_chain.read_states()
+        if len(states) != 7 or states[6].id != 7:
+            raise RuntimeError('Unexpected I2RT motor order during gripper calibration rebase')
+        arm._gripper_limits = limits.copy()
+        arm.remapper = mapper
+        arm._joint_state = arm._motor_state_to_joint_state(states)
+        arm._commands.pos[6] = states[6].pos
+        arm._last_gripper_command_qpos = states[6].pos
+        # Discard any startup limiter target computed using the old mapping.
+        arm._gripper_force_limiter._gripper_adjusted_qpos = None
+        arm._gripper_force_limiter._is_clogged = False
+
+
+def _open_arm(channel, gripper_limits, *, calibration_offset=None):
+    try:
+        from i2rt.robots.get_robot import get_yam_robot
+        from i2rt.robots.utils import GripperType
+    except ImportError as exc:
+        raise RuntimeError('Install I2RT in the Client environment; see docs/yam.md') from exc
+    # Do not let the SDK immediately hold a gripper pose in the wrong calibrated
+    # coordinate range. Gravity-compensation startup leaves gripper PD gains zero.
+    arm = get_yam_robot(channel=channel, gripper_type=GripperType.LINEAR_4310,
+                        gripper_limits_override=gripper_limits,
+                        zero_gravity_mode=True)
+    try:
+        chain = arm.motor_chain
+        calibrated = _vector(gripper_limits, 2, 'gripper_limits')
+        limits = calibrated.copy()
+        offsets = _vector(chain.motor_offset, 7, 'I2RT motor_offset')
+        directions = _vector(chain.motor_direction, 7, 'I2RT motor_direction')
+        if calibration_offset is not None:
+            if directions[6] not in (-1, 1):
+                raise RuntimeError('Gripper motor direction must be +1 or -1')
+            # SDK q = (raw - offset) * direction. Preserve raw physical endpoints.
+            shift = (calibration_offset - offsets[6]) * directions[6]
+            limits += shift
+            if not np.isfinite(limits).all() or limits[0] == limits[1]:
+                raise ValueError('Invalid rebased gripper limits')
+            if shift != 0:
+                _rebase_gripper_limits(arm, limits)
+        state = next(s for s in chain.read_states() if s.id == 7)
+        measured = float(state.pos)  # SDK direction/offset-adjusted radians.
+        current = _vector(arm.get_joint_pos(), 7, 'I2RT startup joint position')
+        print(json.dumps({
+            'event': 'yam_gripper_startup', 'channel': channel, 'motor_id': 7,
+            'calibrated_closed_rad': float(calibrated[0]),
+            'calibrated_open_rad': float(calibrated[1]),
+            'calibration_offset_rad': calibration_offset,
+            'effective_closed_rad': float(limits[0]),
+            'effective_open_rad': float(limits[1]),
+            'measured_position_rad': measured,
+            'measured_normalized': float(current[6]),
+            'motor_offset_rad': float(offsets[6]),
+            'motor_direction': float(directions[6]),
+            'chain_running': bool(chain.running),
+        }, allow_nan=False), flush=True)
+        low, high = min(limits), max(limits)
+        # Check both cached representations before granting position control.
+        mapped = limits[0] + current[6] * (limits[1] - limits[0])
+        if not chain.running or any(
+            not np.isfinite(p) or p < low - _GRIPPER_STARTUP_TOLERANCE_RAD
+            or p > high + _GRIPPER_STARTUP_TOLERANCE_RAD for p in (measured, mapped)
+        ):
+            raise RuntimeError(
+                f'YAM {channel} gripper startup mismatch; position hold NOT enabled: '
+                f'measured={measured:.9g}, calibrated=[{limits[0]:.9g}, {limits[1]:.9g}], '
+                f'motor_offset={offsets[6]:.9g}, normalized={current[6]:.9g}. '
+                'Check calibration and startup coordinates; do not widen limits to bypass this check.')
+        current[6] = np.clip(current[6], 0, 1)
+        arm.command_joint_pos(current)
+        return arm
+    except BaseException:
+        try:
+            _close_arm(arm)
+        except Exception:
+            log.exception('YAM startup validation cleanup failed on %s', channel)
+        raise
+
+
+class _RealSenseCamera:
+    def __init__(self, serial, timeout_ms):
+        try:
+            import pyrealsense2 as rs
+        except ImportError as exc:
+            raise RuntimeError('Install colosseum-client[yam] for RealSense cameras') from exc
+        self.pipeline, self.timeout_ms = rs.pipeline(), timeout_ms
+        settings = rs.config()
+        settings.enable_device(str(serial))
+        settings.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
+        try:
+            self.pipeline.start(settings)
+        except BaseException:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            raise
+
+    def read(self):
+        frame = self.pipeline.wait_for_frames(self.timeout_ms).get_color_frame()
+        if not frame:
+            raise RuntimeError('YAM camera returned no color frame')
+        return np.asanyarray(frame.get_data()).copy()
+
+    def close(self):
+        self.pipeline.stop()
+
+
+class YAMRobot(Robot):
+    joint_count = 12
+    has_gripper = True
+    action_dim = 14
+    action_space_name = 'joint_position'
+
+    def __init__(self, config):
+        settings = dict(config.adapter_config)
+        allowed = {'left_channel', 'right_channel', 'left_gripper_limits',
+                   'right_gripper_limits', 'joint_low', 'joint_high',
+                   'left_gripper_calibration_offset', 'right_gripper_calibration_offset',
+                   'joint_max_step', 'joint_step_mode', 'joint_limit_mode', 'gripper_max_step',
+                   'zero_position_tolerance', 'camera_timeout_ms'}
+        if settings.keys() - allowed:
+            raise ValueError(f'Unknown YAM settings: {sorted(settings.keys() - allowed)}')
+        self.low = _vector(settings.get('joint_low'), 12, 'joint_low')
+        self.high = _vector(settings.get('joint_high'), 12, 'joint_high')
+        self.max_step = _vector(settings.get('joint_max_step'), 12, 'joint_max_step')
+        self.joint_step_mode = settings.get('joint_step_mode', 'reject')
+        tolerance = settings.get('zero_position_tolerance', .05)
+        if (isinstance(tolerance, bool) or not isinstance(tolerance, (int, float))
+                or not np.isfinite(tolerance) or not 0 < tolerance <= .1):
+            raise ValueError('zero_position_tolerance must be in (0, 0.1] radians')
+        self.zero_position_tolerance = float(tolerance)
+        if self.joint_step_mode not in ('reject', 'clip', 'clip_commanded', 'interpolate'):
+            raise ValueError('joint_step_mode must be reject, clip, clip_commanded or interpolate')
+        # clip: saturate policy targets at joint_low/high and gripper [0, 1]
+        # instead of failing the trial. Measured positions stay strictly checked.
+        self.joint_limit_mode = settings.get('joint_limit_mode', 'reject')
+        if self.joint_limit_mode not in ('reject', 'clip'):
+            raise ValueError('joint_limit_mode must be reject or clip')
+        gripper_step = settings.get('gripper_max_step', .15)
+        if (isinstance(gripper_step, bool) or not isinstance(gripper_step, (int, float))
+                or not np.isfinite(gripper_step) or not 0 < gripper_step <= 1):
+            raise ValueError('gripper_max_step must be in (0, 1]')
+        self.gripper_max_step = float(gripper_step)
+        # clip_commanded: last sent 14-D target; None until the first command.
+        self._last_command = None
+        if np.any(self.low >= self.high) or np.any(self.max_step <= 0):
+            raise ValueError('YAM requires joint_low < joint_high and positive joint_max_step')
+        if np.any(self.low > 0) or np.any(self.high < 0):
+            raise ValueError('YAM normal finish requires zero within all joint limits')
+        channels = [settings.get(f'{side}_channel') for side in ('left', 'right')]
+        if any(not isinstance(c, str) or not c.strip() for c in channels) or channels[0] == channels[1]:
+            raise ValueError('YAM requires distinct left_channel and right_channel')
+        limits = [_vector(settings.get(f'{side}_gripper_limits'), 2, f'{side}_gripper_limits')
+                  for side in ('left', 'right')]
+        if any(v[0] == v[1] for v in limits):
+            raise ValueError('Gripper limits must be distinct calibrated [closed, open] positions')
+        calibration_offsets = []
+        for side in ('left', 'right'):
+            name = f'{side}_gripper_calibration_offset'
+            value = settings.get(name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not np.isfinite(value)):
+                raise ValueError(f'{name} must be finite radians or null')
+            calibration_offsets.append(None if value is None else float(value))
+        if set(config.cameras) != set(CAMERAS) or len(set(config.cameras.values())) != 3:
+            raise ValueError('YAM requires three distinct cameras: head_image, left_image, right_image')
+        if config.control_hz != 30:
+            raise ValueError('MolmoAct2 YAM requires control_hz: 30')
+        timeout = settings.get('camera_timeout_ms', 1000)
+        if type(timeout) is not int or not 1 <= timeout <= 10000:
+            raise ValueError('camera_timeout_ms must be an integer in [1, 10000]')
+        self.arms, self.cameras, self.closed = [], {}, False
+        self._telemetry_stop = threading.Event()
+        self._telemetry_thread = None
+        try:
+            # Check cameras before enabling either arm. No automatic homing.
+            for name in CAMERAS:
+                self.cameras[name] = _RealSenseCamera(config.cameras[name], timeout)
+                self.cameras[name].read()
+            for channel, calibration, offset in zip(channels, limits, calibration_offsets):
+                if offset is None:
+                    self.arms.append(_open_arm(channel, calibration))
+                else:
+                    self.arms.append(_open_arm(channel, calibration, calibration_offset=offset))
+            self._read_positions()
+            self._start_gripper_telemetry()
+        except BaseException:
+            try:
+                self.close()
+            except Exception:
+                log.exception('YAM initialization cleanup failed')
+            raise
+
+    def _print_gripper_telemetry(self):
+        """Read SDK feedback caches only; never send commands or query the CAN bus.
+
+        On a motor fault I2RT may discard the failing frame before updating its
+        cache. These are last cached readings, not the fault frame's temperature.
+        """
+        for side, arm in zip(('left', 'right'), self.arms):
+            chain = getattr(arm, 'motor_chain', None)
+            if not callable(getattr(chain, 'read_states', None)):
+                continue
+            try:
+                state = next(s for s in chain.read_states() if s.id == 7)
+                running = bool(chain.running)
+                print(json.dumps({
+                    'event': 'yam_gripper_telemetry', 'time_unix_s': time.time(),
+                    'side': side, 'channel': chain.channel, 'motor_id': 7,
+                    'source': 'sdk_feedback_cache', 'chain_running': running,
+                    'possibly_stale': not running,
+                    'mos_temperature_c': float(state.temp_mos),
+                    'rotor_temperature_c': float(state.temp_rotor),
+                    'effort_nm': float(state.eff),
+                    'position_rad': float(state.pos), 'velocity_rad_s': float(state.vel),
+                    'cached_error_code': str(state.error_code),
+                }, allow_nan=False), flush=True)
+            except Exception:
+                # Diagnostics must not interrupt arm control or hide its errors.
+                log.warning('YAM %s gripper telemetry unavailable', side, exc_info=True)
+
+    def _start_gripper_telemetry(self):
+        if not any(callable(getattr(getattr(arm, 'motor_chain', None), 'read_states', None))
+                   for arm in self.arms):
+            return
+
+        def monitor():
+            while not self._telemetry_stop.is_set():
+                self._print_gripper_telemetry()
+                if self._telemetry_stop.wait(_GRIPPER_LOG_INTERVAL):
+                    break
+
+        self._telemetry_thread = threading.Thread(target=monitor, name='yam-gripper-telemetry',
+                                                   daemon=True)
+        self._telemetry_thread.start()
+
+    def _read_positions(self):
+        if self.closed:
+            raise RuntimeError('YAM is closed')
+        positions = []
+        for side, arm in zip(('left', 'right'), self.arms):
+            value = _vector(arm.get_joint_pos(), 7, 'I2RT joint position')
+            # I2RT already normalizes using the calibrated closed/open limits.
+            # Saturate endpoint overshoot; do not normalize a second time or
+            # change measured arm joints. Copies preserve SDK-owned feedback.
+            clipped = float(np.clip(value[6], 0, 1))
+            if clipped != value[6]:
+                log.warning('YAM %s_gripper measured normalized value=%.6f outside [0, 1]; '
+                            'clipped to %.6f. Check calibrated gripper limits if persistent.',
+                            side, value[6], clipped)
+            value[6] = clipped
+            positions.append(value)
+        joints = np.r_[positions[0][:6], positions[1][:6]]
+        details = _joint_bounds_details(joints, self.low, self.high)
+        if details:
+            log.warning('YAM measured joint position outside configured bounds: %s', details)
+        return positions
+
+    def get_observation(self):
+        if self.closed:
+            raise RuntimeError('YAM is closed')
+        images = {name: camera.read() for name, camera in self.cameras.items()}
+        left, right = self._read_positions()
+        return RobotObservation(images, np.r_[left[:6], right[:6]].astype(np.float32),
+                                np.array([left[6], right[6]], dtype=np.float32),
+                                np.empty(0, dtype=np.float32))  # FK is unavailable, not zero.
+
+    def _validated_action(self, action, *, policy=False):
+        value = _vector(action, 14, 'YAM action')
+        joints = np.r_[value[:6], value[7:13]]
+        if policy and self.joint_limit_mode == 'clip':
+            details = _joint_bounds_details(joints, self.low, self.high)
+            grippers = [f'{side}_gripper: target={value[i]:.6f}'
+                        for side, i in (('left', 6), ('right', 13)) if not 0 <= value[i] <= 1]
+            if details or grippers:
+                log.warning('YAM policy targets clipped to limits: %s', '; '.join(filter(None, [details, *grippers])))
+                joints = np.clip(joints, self.low, self.high)
+                value = value.copy()
+                value[:6], value[7:13] = joints[:6], joints[6:]
+                value[[6, 13]] = np.clip(value[[6, 13]], 0, 1)
+        if np.any(joints < self.low) or np.any(joints > self.high):
+            _bounds_error('YAM action exceeds joint limits: ' + _joint_bounds_details(joints, self.low, self.high))
+        if np.any(value[[6, 13]] < 0) or np.any(value[[6, 13]] > 1):
+            details = '; '.join(f'{side}_gripper: target={value[i]:.6f}, low=0.000000, high=1.000000'
+                                for side, i in (('left', 6), ('right', 13)) if not 0 <= value[i] <= 1)
+            _bounds_error('YAM grippers must be in [0, 1] (0 closed, 1 open): ' + details)
+        return value
+
+    def _interpolation(self, action):
+        """MolmoAct-style linear targets, with a strict command spacing bound.
+
+        Read actual feedback once at the start, then interpolate commands. This
+        bounds command increments, not tracking error or physical joint speed.
+        """
+        target = self._validated_action(action, policy=True)
+        left, right = self._read_positions()
+        start = self._validated_action(np.r_[left, right])
+        limits = np.r_[self.max_step[:6], .01, self.max_step[6:], .01]
+        intervals = max(1, int(np.ceil(np.max(np.abs(target - start) / limits))))
+        if intervals > 100:
+            raise ValueError(f'YAM interpolation requires {intervals} intervals (maximum 100); '
+                             'check starting pose and target')
+        # ceil + intervals+1 avoids upstream floor/linspace endpoint overshoot.
+        return np.linspace(start, target, intervals + 1)[1:]
+
+    def execute(self, action):
+        if self.joint_step_mode != 'interpolate':
+            return self._execute_single(action)
+        for target in self._interpolation(action):
+            started = time.monotonic()
+            self._send_action(target)
+            time.sleep(max(0, 1 / 30 - (time.monotonic() - started)))
+
+    async def execute_async(self, action, robot_call):
+        """Keep each SDK call on its owning thread; allow cancellation per tick."""
+        if self.joint_step_mode != 'interpolate':
+            return await robot_call(self._execute_single, action)
+        targets = await robot_call(self._interpolation, action)
+        for target in targets:
+            started = time.monotonic()
+            await robot_call(self._send_action, target)
+            await asyncio.sleep(max(0, 1 / 30 - (time.monotonic() - started)))
+
+    def _execute_single(self, action):
+        if self.joint_step_mode == 'clip_commanded':
+            return self._execute_clip_commanded(action)
+        value = self._validated_action(action, policy=True)
+        joints = np.r_[value[:6], value[7:13]]
+        left, right = self._read_positions()
+        measured = np.r_[left[:6], right[:6]]
+        if self.joint_step_mode == 'clip' and (np.any(measured < self.low) or np.any(measured > self.high)):
+            _bounds_error('YAM measured position exceeds joint limits; cannot clip action: ' +
+                          _joint_bounds_details(measured, self.low, self.high))
+        delta = joints - measured
+        exceeded = np.flatnonzero(np.abs(delta) > self.max_step)
+        if exceeded.size:
+            details = '; '.join(
+                f'{"left" if i < 6 else "right"}_joint{i % 6 + 1}: '
+                f'measured={measured[i]:.6f}, target={joints[i]:.6f}, '
+                f'delta={delta[i]:.6f}, limit={self.max_step[i]:.6f}'
+                for i in exceeded)
+            if self.joint_step_mode != 'clip':
+                _bounds_error('YAM action exceeds joint_max_step from measured position: ' + details)
+            # Bound each target against fresh feedback, never the previous command.
+            # Keep absolute limits strict; do not attempt recovery from outside them.
+            limited = measured + np.clip(delta, -self.max_step, self.max_step)
+            value[:6], value[7:13] = limited[:6], limited[6:]
+            log.warning('YAM joint targets clipped (radians): %s', details)
+        self._send_action(value)
+
+    def _execute_clip_commanded(self, action):
+        """Clamp against the previously commanded target, as LeRobot's
+        eval_yam_joint_policy does; the first command is bounded by measured
+        feedback. Joints use joint_max_step, grippers gripper_max_step."""
+        value = self._validated_action(action, policy=True)
+        if self._last_command is None:
+            left, right = self._read_positions()
+            self._last_command = self._validated_action(np.r_[left, right])
+        previous = self._last_command
+        limits = np.r_[self.max_step[:6], self.gripper_max_step, self.max_step[6:], self.gripper_max_step]
+        delta = value - previous
+        exceeded = np.flatnonzero(np.abs(delta) > limits)
+        if exceeded.size:
+            names = [f'left_joint{i + 1}' for i in range(6)] + ['left_gripper']
+            names += [f'right_joint{i + 1}' for i in range(6)] + ['right_gripper']
+            log.warning('YAM targets clipped against previous command: %s', '; '.join(
+                f'{names[i]}: previous={previous[i]:.6f}, target={value[i]:.6f}, '
+                f'delta={delta[i]:.6f}, limit={limits[i]:.6f}' for i in exceeded))
+            value = previous + np.clip(delta, -limits, limits)
+        self._send_action(value)
+        self._last_command = value
+
+    def _send_action(self, action):
+        if self.closed:
+            raise RuntimeError('YAM is closed')
+        value = self._validated_action(action)
+        try:
+            # Both commands validated before either arm moves. CAN writes are sequential.
+            self.arms[0].command_joint_pos(value[:7].copy())
+            self.arms[1].command_joint_pos(value[7:].copy())
+        except BaseException:
+            try:
+                self.close()
+            except Exception:
+                log.exception('YAM command failure cleanup failed')
+            raise
+
+    async def finish_trial(self, robot_call):
+        """Return to zero; caller must gate execution and cancellation.
+
+        Zero refers to calibrated joint angles, not a collision-checked park pose.
+        Keep grippers unchanged. Await each short SDK operation on the robot's
+        existing executor so cancellation cannot leave a homing thread running.
+        """
+        print('YAM return: moving arm joints to zero; grippers unchanged.', flush=True)
+        left, right = await robot_call(self._read_positions)
+        self._validated_action(np.r_[left, right])
+        target = np.r_[left[:6], right[:6]]
+        measured = target.copy()
+        grippers = np.array([left[6], right[6]])
+        # Fixed command ramp, independent of feedback lag (as in interpolation).
+        # This limits commanded motion, not physical velocity or tracking error.
+        increment = np.minimum(self.max_step, .15 / 30)
+        deadline = time.monotonic() + 60
+        settled = 0
+        zero_sent = False
+        while time.monotonic() < deadline:
+            target = target - np.clip(target, -increment, increment)
+            action = np.r_[target[:6], grippers[:1], target[6:], grippers[1:]]
+            await robot_call(self._send_action, action)
+            if not zero_sent and np.all(target == 0):
+                zero_sent = True
+                print('YAM zero target sent; waiting for measured position confirmation.', flush=True)
+            await asyncio.sleep(1 / 30)
+            left, right = await robot_call(self._read_positions)
+            measured = np.r_[left[:6], right[:6]]
+            settled = settled + 1 if np.all(target == 0) and np.all(np.abs(measured) <= self.zero_position_tolerance) else 0
+            if settled >= 3:
+                print('YAM zero position reached; proceeding to torque shutdown.', flush=True)
+                return
+        details = '; '.join(
+            f'{"left" if i < 6 else "right"}_joint{i % 6 + 1}: '
+            f'measured={measured[i]:.6f}, target={target[i]:.6f}'
+            for i in range(12))
+        raise RuntimeError('YAM move to zero timed out; position was not confirmed; '
+                           f'zero_target_sent={zero_sent}, tolerance={self.zero_position_tolerance:.6f} rad; {details}')
+
+    @staticmethod
+    def _zero_recovery_choice():
+        if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline()
+            if line == '':
+                return None
+            choice = line.strip().lower()
+            if choice == '':
+                return 'retry'
+            if choice in ('s', 'skip'):
+                return 'skip'
+            print('Press Enter to retry, or type s then Enter to skip and release torque.', flush=True)
+        return None
+
+    async def hold_for_recovery(self, robot_call):
+        """Keep SDK position control alive after a failed return, until retried.
+
+        No automatic torque release on a healthy connection. The evaluation
+        caller handles first cancellation; forced exit cannot guarantee hold.
+        """
+        while True:
+            left, right = await robot_call(self._read_positions)
+            await robot_call(self._send_action, np.r_[left, right])
+            print('YAM return failed: position hold commanded; automatic torque shutdown paused. '
+                  'Keep this process running. Press Enter to retry return to zero, '
+                  'or type s then Enter to SKIP and RELEASE TORQUE (support the arms first). '
+                  'Repeated Ctrl+C may force shutdown and release torque.', flush=True)
+            choice = self._zero_recovery_choice()
+            while choice is None:
+                await asyncio.sleep(.1)
+                choice = self._zero_recovery_choice()
+            if choice == 'skip':
+                print('YAM return skipped by operator; zero position NOT confirmed. '
+                      'Proceeding to torque shutdown.', flush=True)
+                return
+            try:
+                await self.finish_trial(robot_call)
+                return
+            except Exception as exc:
+                if self.closed:
+                    raise
+                print(f'YAM return retry failed: {exc}', flush=True)
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        errors = []
+        self._telemetry_stop.set()
+        if self._telemetry_thread is not None:
+            self._telemetry_thread.join(timeout=_CONTROL_JOIN_TIMEOUT)
+            if self._telemetry_thread.is_alive():
+                errors.append(RuntimeError('YAM gripper telemetry thread did not stop'))
+        for resource in [*self.arms, *self.cameras.values()]:
+            try:
+                if any(resource is arm for arm in self.arms):
+                    _close_arm(resource)
+                else:
+                    resource.close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError('YAM resource shutdown failed') from errors[0]

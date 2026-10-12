@@ -25,6 +25,8 @@ Subcommands:
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
+- ``inspect-robots colosseum`` — run native agents with Router assignments,
+  Colosseum recording, human scoring and resumable dataset uploads.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -52,7 +54,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from functools import partial
@@ -146,6 +148,7 @@ _KIND_BY_PLURAL = {
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
 _SUBCOMMANDS = (
+    "colosseum",
     "list",
     "run",
     "eval-set",
@@ -392,6 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="capture camera frames during the run and, after the embodiment is "
         "closed, encode one MP4 per trial/camera under RUN_DIR/videos (needs ffmpeg)",
     )
+
+    from inspect_robots.colosseum import add_parser as add_colosseum_parser
+
+    add_colosseum_parser(sub)
 
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
     p_eval_set.add_argument(
@@ -1462,7 +1469,9 @@ def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fail-on-error must be finite and >= 0, got {args.fail_on_error}")
 
 
-def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _ResolvedComponents:
+def _resolve_components(
+    args: argparse.Namespace, defaults: Defaults, *, policy_override: Any = None
+) -> _ResolvedComponents:
     """Pick and construct the policy/embodiment pair shared by ``run`` and ``eval-set``.
 
     The embodiment is constructed last, so callers can invoke this immediately
@@ -1495,7 +1504,11 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
     policy_kvs = {**policy_config_args, **_parse_kvs(args.policy_args)}
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
-    policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
+    policy = (
+        policy_override
+        if policy_override is not None
+        else _resolve_or_exit("policy", policy_name, **policy_kvs)
+    )
     factories = registered("embodiment")
     slots = device_slots(factories[embodiment_name]) if embodiment_name in factories else ()
     claim = claim_devices(slots, embodiment_kvs, os.environ)
@@ -1590,7 +1603,13 @@ def _announce_live_view(
     )
 
 
-def _cmd_run(args: argparse.Namespace) -> int:
+def _cmd_run(
+    args: argparse.Namespace,
+    *,
+    policy_override: Any = None,
+    extra_sinks: Sequence[LogSink] = (),
+    embodiment_wrapper: Callable[[Any], Any] | None = None,
+) -> int:
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
             "--rerun-port spawns a local viewer and --rerun-connect streams "
@@ -1669,13 +1688,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
 
-    resolved = _resolve_components(args, defaults)
+    resolved = (
+        _resolve_components(args, defaults)
+        if policy_override is None
+        else _resolve_components(args, defaults, policy_override=policy_override)
+    )
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
     speaker_sink: LogSink | None = None
     live_sink: LiveLogSink | None = None
     rerun_sink: LogSink | None = None
     try:
+        if embodiment_wrapper is not None:
+            embodiment = embodiment_wrapper(embodiment)
+            resolved = resolved._replace(embodiment=embodiment)
         if is_auto:
             import inspect_robots.taskgen
             from inspect_robots.errors import ConfigError
@@ -1744,7 +1770,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
-        sinks: list[LogSink] = [sink]
+        sinks: list[LogSink] = [sink, *extra_sinks]
         if not args.no_live_log:
             live_sink = LiveLogSink(args.log_dir)
             sinks.append(live_sink)
@@ -2894,6 +2920,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_list(args.what)
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "colosseum":
+        from inspect_robots.colosseum import run
+
+        return run(args)
     if args.command == "eval-set":
         return _cmd_eval_set(args)
     if args.command == "inspect":

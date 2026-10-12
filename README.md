@@ -291,6 +291,17 @@ inspect-robots video logs/*_run*/cubepick-reach_*.json
 Or add `--save-video` to `inspect-robots run`; it captures frames and writes
 the MP4s under that run's `videos/` directory after the embodiment closes.
 
+Run native Inspect agents with locally selected Colosseum LLM pairs, human scoring
+and resumable LeRobot uploads using `inspect-robots colosseum --local-pair
+--model-a gpt-6-astra --model-b grok-4.7`. Save with `--defer-submit`, review, then
+publish with `--submit-only --resume local_ID`. Use `--record-only` to defer scoring too, then
+`inspect-robots colosseum --client-config CLIENT.yaml --review` to review videos,
+edit scores and explicitly submit from **http://127.0.0.1:8767/**. Router-assigned evaluations remain
+available without `--local-pair`. The copied Client and Policy
+Server source, configuration examples and setup instructions are in
+[the Colosseum bridge guide](integrations/README.md). The current bridge supports
+YAM joint control or `yam_eef` EEF control through IK, with joint commands exported at 30 Hz.
+
 ### Python API
 
 Everything is a Python API. No hardware or simulator needed: the

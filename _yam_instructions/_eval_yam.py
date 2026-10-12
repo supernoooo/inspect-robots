@@ -83,7 +83,7 @@ def main() -> int:
     parser.add_argument("--config", default=str(ROOT / ".yam/config.ini"))
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--max-llm-calls", type=int, default=60)
-    parser.add_argument("--max-steps", type=int, default=1200)
+    parser.add_argument("--max-steps", type=int, default=800)
     parser.add_argument(
         "--max-action-delta",
         type=float,

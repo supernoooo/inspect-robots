@@ -12,7 +12,7 @@ license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 dependencies = [
     "inspect-robots>=0.58",
-    "inspect-robots-yam>=0.36.1.dev0,<0.37",
+    "inspect-robots-yam>=0.37,<0.38",
 ]
 
 [project.optional-dependencies]

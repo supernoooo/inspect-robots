@@ -14,6 +14,10 @@ Install into the environment that already contains `inspect-robots-yam` and
 uv pip install -e ./plugins/inspect-robots-yam-eef
 ```
 
+This installs the supported `inspect-robots-yam` 0.37 release series. The
+earlier `>=0.36.1.dev0,<0.37` constraint referred to an unpublished development
+version and could not be resolved from PyPI.
+
 By default, `yam_eef` uses the same joint-space home as YAM's joint-control
 mode: six zero joint angles and an open gripper for each arm. This overrides
 YAM's provisional EEF-specific home, which has different joint angles. You
@@ -72,3 +76,14 @@ Use small moves, reobserve after each chunk, and validate the workspace and
 table height on the actual rig with an operator at the e-stop. See the
 `Cartesian EEF mode` section in the `inspect-robots-yam` README for the full
 coordinate and safety contract.
+
+For Colosseum evaluation and automatic upload, use `inspect-robots colosseum`
+with `--embodiment yam_eef`; see the [bridge guide](../../integrations/README.md).
+Each normal step reports `StepResult.info["yam_joint_command"]`: the 14-D
+absolute joint target returned by the native YAM send path after IK and joint
+clipping, with grippers normalized to 0 closed and 1 open. This telemetry is
+separate from the EEF action and measured joint feedback. Steps that execute no
+policy command, including a thermal shutdown, omit it; a previous step or a
+parking command is never substituted. The bridge exports these sent joint
+commands under the Router's `joint_position` contract and keeps original EEF
+targets in the local Inspect log.
