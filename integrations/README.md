@@ -288,7 +288,6 @@ frame_index / 30，真实间隔保存在 `observation.capture_timestamp`。最�
 --excel /home/rc1/inspect-robots/logs/colosseum/results.xlsx
 ```
 
-`_yam_instructions/_instructions.sh` 中的 Colosseum 命令已经包含这个参数。
 当前本地配置的 `evaluation_dir` 是 `/home/rc1/inspect-robots/logs/colosseum`，
 因此从其他目录启动时，日志仍保存在该项目。已有 Excel 已复制到该目录，
 原 `/home/rc1/lerobot/eval_logs/ROBOCOLOSSEUM/results.xlsx` 不再由此脚本更新。

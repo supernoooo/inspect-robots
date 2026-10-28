@@ -170,7 +170,7 @@ def main() -> int:
             parser.error(f"Claude Code executable missing: {claude_command}")
     if not args.probe:
         if not Path(config).is_file():
-            parser.error(f"Config missing: {config}; use the SO-101 deployment config from _instructions.sh.")
+            parser.error(f"Config missing: {config}; see _so101_instructions/COLOSSEUM.md for setup.")
         os.environ["SO101_ROBOT_ID"] = robot_id
         os.environ["SO101_CALIBRATION_DIR"] = calibration_dir
         check_arm_settings(parser)

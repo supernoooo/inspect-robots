@@ -235,4 +235,6 @@ __marimo__/
 # control; share them as release assets or external storage instead.
 logs/
 *.rrd
+eval_results/
+third_party/colosseum-client/eval_runs/
 .yam/colosseum*.yaml

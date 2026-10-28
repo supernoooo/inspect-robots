@@ -1,6 +1,6 @@
 # SO-101：使用 inspect-robots CLI 评测
 
-三种 agent 的完整命令在 [_instructions.sh](_instructions.sh)。执行 Claude、GPT 或 Grok 对应的命令段，入口都是 `inspect-robots run`。
+可用 `python _so101_instructions/_eval_so101.py PROVIDER` 启动 Claude、GPT、Gemini 或 Grok 评测，其中 `PROVIDER` 分别为 `claude`、`gpt`、`gemini`、`grok`。先加 `--dry-run` 检查生成的 `inspect-robots run` 命令。
 
 当前 checkout 为 `jjn`。电机驱动使用官方 [robocurve/inspect-robots-so101](https://github.com/robocurve/inspect-robots-so101)，固定 commit `096d89e12a9e31228fa57a7e5b7d236b09f3db6e`。`so101_configured` 是配置这台机器的 CLI 注册入口：将相机参数转换成官方 `SOArmConfig` 所需的对象，并补充关节名称、起始 home 和退出归位。电机连接、校准检查、限幅、ramp、pacing 和 settling 均复用官方实现。
 
@@ -54,7 +54,7 @@ inspect-robots run \
   --log-dir logs/so101/gpt
 ```
 
-Claude/Grok 的精简命令在 `_instructions.sh`。显式 `-E`、`-P` 和对应 CLI 参数优先于配置；例如 `-P max_llm_calls=10` 可以只覆盖当次运行的预算。模型、wire 也能写入 `[policy.args]`，当前保留在命令中方便三种 agent 切换。Claude 的 `claude_command` 只适用于 `wire=claude-code`，因此不放进三种模型共享的配置。
+Claude/Grok 可用上述 Python 入口切换 provider，也可参照 GPT 示例直接传入 `-P wire=claude-code` 或 `-P wire=responses` 和对应模型。显式 `-E`、`-P` 和对应 CLI 参数优先于配置；例如 `-P max_llm_calls=10` 可以只覆盖当次运行的预算。模型、wire 也能写入 `[policy.args]`，当前保留在命令中方便切换。Claude 的 `claude_command` 只适用于 `wire=claude-code`，因此不放进多种模型共享的配置。
 
 `epochs` 默认 1。eval 使用官方 `so_arm` 的动作语义：`max_relative_target=None`、不额外声明 `max_step`，也不传入 `--max-action-delta=1.0`。CLI 保留范围与步幅检查，agent 按 `max_speed_frac=0.05` 和读取到的校准范围插值；当前 10 Hz 下，五个关节每步预算约为 `[1.08, 1.034, 0.973, 1.013, 1.8]` degrees，夹爪为 0.5 个归一化单位。这是规划序列的步幅，最终目标仍会完整交给驱动，eval 没有基于实测位置的额外 1° 截断。当前 CLI 尚未从配置读取 `fail_on_error`，命令中保留 `--fail-on-error 1`。任务指令和不同 agent 的日志根目录仍在命令中选择。
 
