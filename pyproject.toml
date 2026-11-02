@@ -29,4 +29,4 @@ Repository = "https://github.com/supernoooo/inspect-robots"
 packages = ["src/inspect_robots"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/inspect_robots", "README.md", "LICENSE", "plugins/inspect-robots-yam-eef"]
+include = ["src/inspect_robots", "README.md", "LICENSE", "plugins/inspect-robots-yam-eef", "plugins/inspect-robots-agent"]

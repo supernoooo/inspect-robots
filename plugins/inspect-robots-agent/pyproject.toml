@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-agent"
+version = "0.26.0"
+description = "LLM agent policy for Inspect Robots: frontier LLMs (Claude, GPT, anything OpenAI-compatible) drive any registered embodiment through tool calls."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+dependencies = ["inspect-robots>=0.30", "numpy>=1.24", "httpx>=0.27", "websockets>=12"]
+
+[project.entry-points."inspect_robots.policies"]
+agent = "inspect_robots_agent.policy:agent_policy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_agent"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_agent", "README.md"]
