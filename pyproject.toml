@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots"
+version = "0.58.0+colosseum"
+description = "Inspect Robots core for Colosseum LLM evaluation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Inspect Robots contributors" }]
+dependencies = ["numpy>=1.24", "typesafe-sdk>=0.7.0"]
+
+[project.optional-dependencies]
+rerun = ["rerun-sdk>=0.20", "pillow>=10"]
+viz = ["rerun-sdk>=0.20", "pillow>=10"]
+all = ["inspect-robots[rerun]"]
+
+[project.scripts]
+inspect-robots = "inspect_robots.cli:main"
+inspect-robot = "inspect_robots.cli:main"
+
+[project.urls]
+Repository = "https://github.com/supernoooo/inspect-robots"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots", "README.md", "LICENSE", "plugins/inspect-robots-yam-eef"]

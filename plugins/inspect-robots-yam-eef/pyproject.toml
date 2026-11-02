@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-yam-eef"
+version = "0.1.0"
+description = "Named Cartesian EEF embodiment for the I2RT YAM bimanual arms."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+dependencies = ["inspect-robots>=0.58", "inspect-robots-yam>=0.37,<0.38"]
+
+[project.entry-points."inspect_robots.embodiments"]
+yam_eef = "inspect_robots_yam_eef:YamEEFEmbodiment"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_yam_eef"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_yam_eef", "README.md"]
