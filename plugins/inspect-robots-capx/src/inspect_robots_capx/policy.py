@@ -38,11 +38,13 @@ from inspect_robots_agent import (
     resolve_provider,
 )
 from inspect_robots_capx._motion import MotionQueue
-from inspect_robots_capx._sandbox import CodeSandbox, ExecutionResult
+from inspect_robots_capx._sandbox import IK_BACKENDS, CodeSandbox, ExecutionResult
 from inspect_robots_capx._servers import CapxServerClients
 
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "claude-code"})
+_CLAUDE_CODE_EFFORT = frozenset({"low", "medium", "high", "max"})
+_CLAUDE_CODE_TIMEOUT_S = 120.0
 
 
 # Duplicated from inspect_robots_agent/policy.py; keep the effort contract in sync.
@@ -65,15 +67,18 @@ _CONTROL_WORD = re.compile(r"(FINISH|GIVE_UP)[.!]?", re.IGNORECASE)
 
 _HELPER_DOCS = """Helpers available in the persistent namespace:
 
-segment(text: str) -> list[dict]
-    Segment the configured camera with SAM3. Each result has a boolean `mask`,
-    `box`, `score`, and `label`.
+segment(text: str, camera: str | None = None) -> list[dict]
+    Segment the configured camera (or another named camera) with SAM3. Each
+    result has a boolean `mask`, `box`, `score`, and `label`. Results include
+    many low-confidence candidates: sort by `score` and treat a best score
+    below about 0.3 as "not found". Depth and plan_grasp() are aligned to the
+    configured camera only.
 plan_grasp(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     Return (K, 4, 4) grasp poses in the camera frame and (K,) scores. K may be
     zero. Use `obs["{extrinsics_key}"] @ pose` to transform a pose into the
     robot-base frame. World and robot base are treated as the same frame.
 solve_ik(position: np.ndarray, quaternion_wxyz: np.ndarray) -> np.ndarray
-    Return the arm-joint vector expected by move_to_joints.
+    Return the arm-joint vector expected by move_to_joints. {ik_note}
 move_to_joints(joints: np.ndarray) -> None
     Queue a speed-limited arm move while holding the gripper.
 open_gripper() / close_gripper() -> None
@@ -85,6 +90,14 @@ and extrinsics (`{extrinsics_key}`) may be provided by the embodiment as
 arrays or zero-argument callables; `obs[...]` access and the helper functions
 resolve callable values automatically.
 """
+
+_IK_NOTES = {
+    "pyroki": "Solved by the Pyroki server in its URDF base frame.",
+    "embodiment": (
+        "Solved by the embodiment in the robot-base frame, seeded from the queued "
+        "joint endpoint; see the embodiment notes for its frame, units, and limits."
+    ),
+}
 
 _SYSTEM_TEMPLATE = """You generate Python code to directly solve a robot manipulation task.
 Write raw Python with no Markdown fences. Helpers are already bound. Import
@@ -138,9 +151,19 @@ class CapxPolicyConfig(PolicyConfig):
     depth_key: str = "depth"
     intrinsics_key: str = "intrinsics"
     extrinsics_key: str = "extrinsics"
+    #: ``pyroki`` (CaP-X server) or ``embodiment`` (``Observation.extra[ik_key]``).
+    ik: str = "pyroki"
+    ik_key: str = "ik_solver"
+    #: Resolved Claude Code executable when ``wire == "claude-code"``.
+    claude_command: str | None = None
+    claude_timeout_s: float | None = None
     max_llm_calls: int = 100
     max_code_failures: int = 3
+    #: Keep camera images from only the newest N observations (None keeps all).
+    image_horizon: int | None = None
     max_speed_frac: float = 0.1
+    #: Gripper ramp speed (range fraction per second); None reuses max_speed_frac.
+    gripper_speed_frac: float | None = None
     request_timeout_s: float = 120.0
     gripper_open_is_high: bool = True
     transcript_echo: bool = False
@@ -174,11 +197,17 @@ class CapxPolicy(PolicyBase):
         depth_key: str = "depth",
         intrinsics_key: str = "intrinsics",
         extrinsics_key: str = "extrinsics",
+        ik: str = "pyroki",
+        ik_key: str = "ik_solver",
         max_speed_frac: float = 0.1,
+        gripper_speed_frac: float | None = None,
         request_timeout_s: float = 120.0,
         gripper_open_is_high: bool = True,
         transcript_echo: bool = False,
         prior_learnings: str | None = None,
+        image_horizon: int | None = None,
+        claude_command: str | None = None,
+        claude_timeout_s: float = _CLAUDE_CODE_TIMEOUT_S,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ) -> None:
@@ -223,8 +252,27 @@ class CapxPolicy(PolicyBase):
             raise ValueError("max_llm_calls must be >= 1")
         if max_code_failures < 1:
             raise ValueError("max_code_failures must be >= 1")
+        if image_horizon is not None and (
+            isinstance(image_horizon, bool)
+            or not isinstance(image_horizon, int)
+            or image_horizon < 1
+        ):
+            raise ConfigError(
+                f"image_horizon must be a positive integer, got {image_horizon!r}.\n"
+                "fix: omit -P image_horizon to keep every frame, or pass e.g. -P image_horizon=2"
+            )
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ValueError("max_speed_frac must be finite and > 0")
+        if gripper_speed_frac is not None and (
+            isinstance(gripper_speed_frac, bool)
+            or not isinstance(gripper_speed_frac, (int, float))
+            or not np.isfinite(gripper_speed_frac)
+            or gripper_speed_frac <= 0
+        ):
+            raise ConfigError(
+                f"gripper_speed_frac must be a positive number, got {gripper_speed_frac!r}.\n"
+                "fix: omit it to reuse max_speed_frac, or pass e.g. -P gripper_speed_frac=0.5"
+            )
         if not np.isfinite(request_timeout_s) or request_timeout_s <= 0:
             raise ValueError("request_timeout_s must be finite and > 0")
         # Unset leaves effort omitted so the provider default applies. A supplied
@@ -241,20 +289,65 @@ class CapxPolicy(PolicyBase):
                 )
         if wire not in _WIRE_FORMATS:
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        if ik not in IK_BACKENDS:
+            raise ConfigError(
+                f"ik must be one of {sorted(IK_BACKENDS)}, got {ik!r}.\n"
+                "fix: use -P ik=embodiment only with an embodiment that publishes "
+                "an IK solver in Observation.extra"
+            )
+        if not isinstance(ik_key, str) or not ik_key:
+            raise ConfigError(f"ik_key must be a non-empty string, got {ik_key!r}")
 
         environ = dict(os.environ) if env is None else env
-        provider = resolve_provider(
-            model=model or environ.get(ENV_MODEL),
-            base_url=base_url,
-            api_key_env=api_key_env,
-            env=environ,
-        )
-        if wire == "responses":
-            self._client: ChatClient | ResponsesClient = ResponsesClient(
-                provider, transport=transport
+        self._client: Any
+        if wire == "claude-code":
+            # Subscription login through the official CLI; the transport (if
+            # any) still serves the perception servers.
+            if base_url is not None or api_key_env is not None:
+                raise ConfigError(
+                    "wire='claude-code' uses the official CLI login, not an API endpoint.\n"
+                    "fix: drop -P base_url and -P api_key_env"
+                )
+            if temperature is not None:
+                raise ConfigError("temperature is not supported on wire='claude-code'")
+            if resolved_effort not in {None, *_CLAUDE_CODE_EFFORT}:
+                raise ConfigError("effort on wire='claude-code' must be low, medium, high, or max")
+            cli_model = (model or environ.get(ENV_MODEL) or "").removeprefix("anthropic/")
+            if not cli_model:
+                raise ConfigError(
+                    "wire='claude-code' needs a model.\n"
+                    "fix: pass -P model=anthropic/<model id> (or a CLI alias such as opus)"
+                )
+            try:
+                # Optional: only some inspect-robots-agent builds ship the
+                # subscription-login CLI client.
+                from inspect_robots_agent._claude_code import ClaudeCodeClient
+            except ImportError as exc:
+                raise ConfigError(
+                    "wire='claude-code' needs an inspect-robots-agent build that provides "
+                    "the Claude Code CLI client (inspect_robots_agent._claude_code).\n"
+                    "fix: use an API key instead, e.g. -P model=anthropic/<model id> with "
+                    "ANTHROPIC_API_KEY set"
+                ) from exc
+            self._client = ClaudeCodeClient(
+                cli_model, command=claude_command, timeout_s=claude_timeout_s, env=environ
             )
+            resolved_model: str | None = cli_model
+            resolved_base_url: str | None = "claude-code://local"
         else:
-            self._client = ChatClient(provider, transport=transport)
+            if claude_command is not None or claude_timeout_s != _CLAUDE_CODE_TIMEOUT_S:
+                raise ConfigError("claude_command/claude_timeout_s require -P wire=claude-code")
+            provider = resolve_provider(
+                model=model or environ.get(ENV_MODEL),
+                base_url=base_url,
+                api_key_env=api_key_env,
+                env=environ,
+            )
+            if wire == "responses":
+                self._client = ResponsesClient(provider, transport=transport)
+            else:
+                self._client = ChatClient(provider, transport=transport)
+            resolved_model, resolved_base_url = provider.model, provider.base_url
         self._servers = CapxServerClients(
             sam3_url=sam3_url,
             graspnet_url=graspnet_url,
@@ -266,18 +359,22 @@ class CapxPolicy(PolicyBase):
         self._depth_key = depth_key
         self._intrinsics_key = intrinsics_key
         self._extrinsics_key = extrinsics_key
+        self._ik = ik
+        self._ik_key = ik_key
         self._max_llm_calls = max_llm_calls
         self._max_code_failures = max_code_failures
+        self._image_horizon = image_horizon
         self._temperature = temperature
         self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
+        self._gripper_speed_frac = gripper_speed_frac
         self._gripper_open_is_high = gripper_open_is_high
         self._transcript_echo = transcript_echo
         self._prior_learnings_text = prior_learnings_text
         self.config = CapxPolicyConfig(
             temperature=temperature,
-            model=provider.model,
-            base_url=provider.base_url,
+            model=resolved_model,
+            base_url=resolved_base_url,
             api_key_env=api_key_env,
             wire=wire,
             effort=resolved_effort,
@@ -288,9 +385,15 @@ class CapxPolicy(PolicyBase):
             depth_key=depth_key,
             intrinsics_key=intrinsics_key,
             extrinsics_key=extrinsics_key,
+            ik=ik,
+            ik_key=ik_key,
+            claude_command=self._client.command if wire == "claude-code" else None,
+            claude_timeout_s=claude_timeout_s if wire == "claude-code" else None,
             max_llm_calls=max_llm_calls,
             max_code_failures=max_code_failures,
+            image_horizon=image_horizon,
             max_speed_frac=max_speed_frac,
+            gripper_speed_frac=gripper_speed_frac,
             request_timeout_s=request_timeout_s,
             gripper_open_is_high=gripper_open_is_high,
             transcript_echo=transcript_echo,
@@ -371,6 +474,7 @@ class CapxPolicy(PolicyBase):
                 max_speed_frac=self._max_speed_frac,
                 gripper_index=gripper_index,
                 gripper_open_is_high=self._gripper_open_is_high,
+                gripper_speed_frac=self._gripper_speed_frac,
             )
         except ValueError as exc:
             raise ValueError(f"{prefix} valid bounded motion arithmetic: {exc}") from exc
@@ -383,6 +487,8 @@ class CapxPolicy(PolicyBase):
             depth_key=self._depth_key,
             intrinsics_key=self._intrinsics_key,
             extrinsics_key=self._extrinsics_key,
+            ik=self._ik,
+            ik_key=self._ik_key,
         )
         self._state_key = state_key
         self._state_labels = (state_key, labels) if labels is not None else None
@@ -417,6 +523,7 @@ class CapxPolicy(PolicyBase):
                 depth_key=self._depth_key,
                 intrinsics_key=self._intrinsics_key,
                 extrinsics_key=self._extrinsics_key,
+                ik_note=_IK_NOTES[self._ik],
             ),
         )
         if self._embodiment_docs is not None and self._embodiment_docs.strip():
@@ -468,6 +575,8 @@ class CapxPolicy(PolicyBase):
                 "content": _observation_content(observation, self._state_labels),
             }
         )
+        if self._image_horizon is not None:
+            _evict_images(self._messages, self._image_horizon)
         llm_latency = 0.0
         while True:
             if self._calls_used >= self._max_llm_calls:
@@ -490,7 +599,9 @@ class CapxPolicy(PolicyBase):
             reply = (message.content or "").strip()
             if reply:
                 self._echo(f"[capx] << {reply}")
-            control = _CONTROL_WORD.fullmatch(reply)
+            # A stop word on the first line ends the trial even when the model
+            # appends a summary; that prose is not code and must not execute.
+            control = _CONTROL_WORD.fullmatch(reply.partition("\n")[0].strip())
             if control is not None:
                 return motion.hold_chunk(
                     state,
@@ -538,22 +649,78 @@ class CapxPolicy(PolicyBase):
             self._echo(f"[capx] stderr:\n{result.stderr.rstrip()}")
 
 
-def _extract_code(message: AssistantMessage) -> str:
-    """Normalize raw, fenced, prose-wrapped, or ``REGENERATE``-prefixed code.
+_EVICTED_IMAGE = {"type": "text", "text": "[image omitted: older camera frame]"}
 
-    A reply that is exactly one fenced block (or a bare snippet) is used as
-    is; otherwise the first fenced block wins, so surrounding prose does not
-    burn a failure turn on a ``SyntaxError``.
+
+def _evict_images(messages: list[dict[str, Any]], horizon: int) -> None:
+    """Replace camera images outside the newest ``horizon`` image-bearing turns.
+
+    Older frames are dropped from the history for good, which bounds request
+    size (the Claude Code CLI rejects inputs over 10 MB) at the cost of the
+    model no longer seeing them.
+    """
+    kept = 0
+    for message in reversed(messages):
+        content = message.get("content")
+        if not isinstance(content, list) or not any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        ):
+            continue
+        kept += 1
+        if kept > horizon:
+            message["content"] = [
+                dict(_EVICTED_IMAGE) if part.get("type") == "image_url" else part
+                for part in content
+            ]
+
+
+def _extract_code(message: AssistantMessage) -> str:
+    """Normalize raw, fenced, prose-wrapped, or ``REGENERATE``-marked code.
+
+    Text up to the last line that is exactly ``REGENERATE`` is the model's
+    commentary and is dropped, so "explanation, REGENERATE, code" replies run
+    only the code. A reply that is exactly one fenced block (or a bare
+    snippet) is used as is; otherwise the first fenced block wins, so
+    surrounding prose does not burn a failure turn on a ``SyntaxError``.
     """
     code = (message.content or "").strip()
-    first, separator, remainder = code.partition("\n")
-    if first.strip() == "REGENERATE" and separator:
-        code = remainder.strip()
+    lines = code.splitlines()
+    markers = [index for index, line in enumerate(lines) if line.strip() == "REGENERATE"]
+    if markers:
+        code = "\n".join(lines[markers[-1] + 1 :]).strip()
     fenced = _FENCED_CODE.fullmatch(code)
     if fenced is not None:
         return fenced.group(1)
     embedded = _FENCED_ANYWHERE.search(code)
-    return embedded.group(1) if embedded is not None else code
+    if embedded is not None:
+        return embedded.group(1)
+    return _strip_leading_prose(code)
+
+
+def _compiles(code: str) -> bool:
+    try:
+        compile(code, "<capx>", "exec")
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _strip_leading_prose(code: str) -> str:
+    """Drop leading commentary lines when only that prose stops the reply compiling.
+
+    Some models open with a sentence before unfenced code (and some wires glue
+    it onto the first code line). Only a reply that fails to compile is
+    touched, and only by removing whole leading lines; if no suffix compiles,
+    the reply is returned unchanged so the model sees its own SyntaxError.
+    """
+    if _compiles(code):
+        return code
+    lines = code.splitlines()
+    for start in range(1, len(lines)):
+        candidate = "\n".join(lines[start:]).strip()
+        if candidate and _compiles(candidate):
+            return candidate
+    return code
 
 
 def _execution_report(code: str, result: ExecutionResult) -> str:

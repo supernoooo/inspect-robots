@@ -215,9 +215,16 @@ def _parse_response(payload: dict[str, Any]) -> tuple[AssistantMessage, list[dic
     calls: list[ToolCall] = []
     for item in output:
         if item.get("type") == "message":
-            for part in item.get("content") or []:
-                if part.get("type") == "output_text":
-                    texts.append(str(part["text"]))
+            # Parts of one message concatenate as-is; separate message items
+            # (e.g. a commentary message then a code message) get a blank line
+            # so their texts never fuse into one line.
+            parts = [
+                str(part["text"])
+                for part in item.get("content") or []
+                if part.get("type") == "output_text"
+            ]
+            if parts:
+                texts.append("".join(parts))
         elif item.get("type") == "function_call":
             calls.append(
                 ToolCall(
@@ -227,6 +234,6 @@ def _parse_response(payload: dict[str, Any]) -> tuple[AssistantMessage, list[dic
                 )
             )
     return (
-        AssistantMessage(content="".join(texts) if texts else None, tool_calls=tuple(calls)),
+        AssistantMessage(content="\n\n".join(texts) if texts else None, tool_calls=tuple(calls)),
         output,
     )

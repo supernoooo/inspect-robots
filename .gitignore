@@ -227,3 +227,6 @@ __marimo__/
 # control; share them as release assets or external storage instead.
 logs/
 *.rrd
+
+# Per-rig SO-101 state: device config, rig notes, calibration, downloaded models.
+.so101/

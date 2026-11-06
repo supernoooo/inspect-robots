@@ -20,6 +20,10 @@ from inspect_robots.types import Observation
 from inspect_robots_capx._motion import MotionQueue
 from inspect_robots_capx._servers import CapxServerClients
 
+#: ``pyroki`` calls the CaP-X Pyroki server; ``embodiment`` calls a solver the
+#: embodiment publishes in ``Observation.extra[ik_key]``.
+IK_BACKENDS = frozenset({"pyroki", "embodiment"})
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
@@ -68,7 +72,11 @@ class CodeSandbox:
         depth_key: str = "depth",
         intrinsics_key: str = "intrinsics",
         extrinsics_key: str = "extrinsics",
+        ik: str = "pyroki",
+        ik_key: str = "ik_solver",
     ) -> None:
+        if ik not in IK_BACKENDS:
+            raise ValueError(f"ik must be one of {sorted(IK_BACKENDS)}, got {ik!r}")
         self._servers = servers
         self._motion = motion
         self._camera = camera
@@ -76,6 +84,8 @@ class CodeSandbox:
         self._depth_key = depth_key
         self._intrinsics_key = intrinsics_key
         self._extrinsics_key = extrinsics_key
+        self._ik = ik
+        self._ik_key = ik_key
         self._observation: Observation | None = None
         self._namespace: dict[str, Any] = {}
         self.reset()
@@ -110,7 +120,9 @@ class CodeSandbox:
                 "state": observation.state,
             }
         )
-        obs.update(observation.extra)
+        # The embodiment IK solver takes arguments, so it must not be resolved
+        # like a zero-argument thunk; it is reachable only through solve_ik().
+        obs.update({k: v for k, v in observation.extra.items() if k != self._ik_key})
         self._namespace["obs"] = obs
 
     def execute(self, code: str) -> ExecutionResult:
@@ -143,12 +155,17 @@ class CodeSandbox:
             value = value()
         return np.asarray(value)
 
-    def _segment(self, text: str) -> list[dict[str, Any]]:
+    def _segment(self, text: str, camera: str | None = None) -> list[dict[str, Any]]:
         observation = self._require_observation()
+        name = self._camera if camera is None else camera
         try:
-            image = observation.images[self._camera]
+            image = observation.images[name]
         except KeyError as exc:
-            raise KeyError(f"observation has no configured camera {self._camera!r}") from exc
+            if camera is None:
+                raise KeyError(f"observation has no configured camera {name!r}") from exc
+            raise KeyError(
+                f"observation has no camera {name!r}; available: {sorted(observation.images)}"
+            ) from exc
         return self._servers.sam3.segment(image, text)
 
     def _plan_grasp(self, mask: npt.NDArray[Any]) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
@@ -163,8 +180,32 @@ class CodeSandbox:
         position: npt.NDArray[Any],
         quaternion_wxyz: npt.NDArray[Any],
     ) -> npt.NDArray[np.float64]:
-        return self._servers.pyroki.solve_ik(
-            position,
-            quaternion_wxyz,
-            self._motion.arm_dof,
-        )
+        if self._ik == "pyroki":
+            return self._servers.pyroki.solve_ik(
+                position,
+                quaternion_wxyz,
+                self._motion.arm_dof,
+            )
+        observation = self._require_observation()
+        solver = observation.extra.get(self._ik_key)
+        if not callable(solver):
+            raise KeyError(
+                f"ik='embodiment' needs observation.extra[{self._ik_key!r}] as a callable "
+                "solver(position, quaternion_wxyz, seed) returning arm joints"
+            )
+        position_array = np.asarray(position, dtype=np.float64).reshape(-1)
+        quaternion_array = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(-1)
+        if position_array.shape != (3,) or quaternion_array.shape != (4,):
+            raise ValueError("solve_ik expects position shape (3,) and quaternion_wxyz shape (4,)")
+        # Seed from the queued endpoint so chained moves solve from where the
+        # arm will be, not from where this turn started.
+        joints = np.asarray(
+            solver(position_array, quaternion_array, self._motion.arm_cursor),
+            dtype=np.float64,
+        ).reshape(-1)
+        if joints.shape != (self._motion.arm_dof,) or not bool(np.all(np.isfinite(joints))):
+            raise ValueError(
+                f"embodiment IK returned shape {joints.shape}; expected "
+                f"{self._motion.arm_dof} finite arm joints"
+            )
+        return joints

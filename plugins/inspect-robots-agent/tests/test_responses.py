@@ -16,7 +16,11 @@ from inspect_robots.types import Observation
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import Provider
-from inspect_robots_agent._responses import ResponsesClient, _translate_content_parts
+from inspect_robots_agent._responses import (
+    ResponsesClient,
+    _parse_response,
+    _translate_content_parts,
+)
 from inspect_robots_agent.policy import AgentPolicyConfig
 
 
@@ -440,7 +444,7 @@ def test_cache_is_pruned_when_submitted_history_drops_call_ids() -> None:
         ),
         (
             [_message("one", item_id="msg_1"), _message("two", item_id="msg_2")],
-            "onetwo",
+            "one\n\ntwo",  # separate items must not fuse (prose glued onto code)
             [],
         ),
     ],
@@ -661,3 +665,21 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
     policy = LLMAgentPolicy(model="test/model", base_url="http://llm.test/v1", env={})
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "chat"
+
+
+def test_separate_message_items_never_fuse_into_one_line() -> None:
+    def message(*texts: str) -> dict[str, Any]:
+        return {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text} for text in texts],
+        }
+
+    parsed, raw = _parse_response(
+        _response(message("I will rise first."), message("import numpy ", "as np"))
+    )
+
+    assert parsed.content == "I will rise first.\n\nimport numpy as np"
+    assert len(raw) == 2
+    empty, _ = _parse_response(_response({"type": "message", "role": "assistant", "content": []}))
+    assert empty.content is None

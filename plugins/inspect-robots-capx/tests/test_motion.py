@@ -237,3 +237,61 @@ def test_declared_step_pacing_precedes_movable_zero_limit_guard() -> None:
             max_speed_frac=1e-300,
             gripper_index=1,
         )
+
+
+def test_arm_cursor_tracks_queued_endpoint_and_requires_a_seed() -> None:
+    space = Box(
+        shape=(3,),
+        low=np.array([-1.0, -1.0, 0.0]),
+        high=np.array([1.0, 1.0, 1.0]),
+        semantics=ActionSemantics("joint_pos", gripper="continuous"),
+    )
+    motion = MotionQueue(space, control_hz=10.0, max_speed_frac=0.1, gripper_index=1)
+    with pytest.raises(RuntimeError):
+        _ = motion.arm_cursor
+    motion.begin_turn(np.array([0.1, 0.5, 0.2]))
+    motion.move_to_joints(np.array([0.3, 0.4]))
+
+    assert motion.arm_cursor.tolist() == [0.3, 0.4]
+
+
+def test_gripper_speed_frac_ramps_the_gripper_faster_within_the_backstop() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([-100.0, 0.0]),
+        high=np.array([100.0, 100.0]),
+        semantics=ActionSemantics("joint_pos", gripper="continuous"),
+    )
+    slow = MotionQueue(space, control_hz=10.0, max_speed_frac=0.05, gripper_index=1)
+    fast = MotionQueue(
+        space, control_hz=10.0, max_speed_frac=0.05, gripper_index=1, gripper_speed_frac=0.5
+    )
+    lengths = []
+    for motion in (slow, fast):
+        motion.begin_turn(np.array([0.0, 0.0]))
+        motion.open_gripper()
+        motion.move_to_joints(np.array([10.0]))
+        chunk = motion.take_chunk()
+        steps = np.diff(np.array([action.data for action in chunk.actions]), axis=0)
+        assert np.abs(steps[:, 1]).max() <= 0.05 * 100 + 1e-9  # DeltaLimit backstop
+        assert np.abs(steps[:, 0]).max() <= 0.05 / 10 * 200 + 1e-9  # arm speed unchanged
+        grip = np.array([action.data[1] for action in chunk.actions])
+        lengths.append(int(np.argmax(grip >= 100.0)) + 1)
+    assert lengths == [201, 21]  # one extra step from the per-step headroom
+
+
+def test_gripper_speed_frac_scales_declared_max_step_and_rejects_bad_values() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=ActionSemantics("joint_pos", gripper="continuous", max_step=(0.01, 0.02)),
+    )
+    motion = MotionQueue(
+        space, control_hz=10.0, max_speed_frac=0.05, gripper_index=1, gripper_speed_frac=0.2
+    )
+    assert motion._step_limits.tolist() == pytest.approx([0.005, 0.02])
+    with pytest.raises(ValueError, match="gripper_speed_frac"):
+        MotionQueue(
+            space, control_hz=10.0, max_speed_frac=0.05, gripper_index=1, gripper_speed_frac=0.0
+        )

@@ -25,7 +25,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Cookbooks',
       collapsed: false,
-      items: ['cookbooks/gr00t-on-yam'],
+      items: ['cookbooks/gr00t-on-yam', 'cookbooks/capx-on-so101'],
     },
     {
       type: 'doc',

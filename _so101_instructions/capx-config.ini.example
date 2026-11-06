@@ -1,0 +1,61 @@
+# CaP-X code-as-policy on the SO-101 (policy capx, embodiment so101_capx_configured).
+# Copy to .so101/capx.ini (gitignored) and replace every <...> placeholder; see
+# docs/cookbooks/capx-on-so101.md. Args sections apply only to the components
+# named in [defaults].
+
+[defaults]
+policy = capx
+embodiment = so101_capx_configured
+scorer = operator
+grader = operator
+max_steps = 2000          # 200 s at 10 Hz: closed-loop grasps probe, align and may retry
+rerun = true
+rerun_save = true
+store_frames = true
+
+[embodiment.args]
+# Follower serial port (ls /dev/serial/by-id/).
+port = /dev/serial/by-id/<FOLLOWER_SERIAL_BY_ID>
+camera_device = /dev/v4l/by-id/<WRIST_CAMERA_BY_ID>
+camera_name = wrist
+camera_mode = both
+use_degrees = true
+robot_id = <FOLLOWER_CALIBRATION_ID>
+calibration_dir = ~/.cache/huggingface/lerobot/calibration/robots/so_follower
+head_camera_name = front
+head_camera_serial = <REALSENSE_SERIAL>
+capture_home = False
+# Fixed home: the arm's folded rest/start pose in calibrated degrees.
+# Order: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper.
+home_pose = [<PAN>, <LIFT>, <ELBOW>, <WRIST_FLEX>, <WRIST_ROLL>, <GRIPPER>]
+return_home = True
+home_max_relative_target = 5.0
+home_ramp_secs = 3.0
+home_tolerance = 2.0       # fixed home: servos hold ~1-1.5 deg off target under load (P-only)
+arm_position_p_coefficient = 32
+# leader_port = /dev/serial/by-id/<LEADER_SERIAL_BY_ID>
+# leader_id = <LEADER_CALIBRATION_ID>
+# leader_calibration_dir = ~/.cache/huggingface/lerobot/calibration/teleoperators/so_leader
+control_hz = 10.0
+settle_tolerance = 2.0     # elbow holds ~1.1 deg off target under gravity
+# CaP-X additions. camera_extrinsics: 4x4 camera-to-base JSON/.npy (meters) from
+# hand-eye calibration of the front RealSense. Leave it unset for closed-loop mode:
+# the model then locates objects relative to the gripper and corrects each turn.
+# Installed by: python _so101_instructions/_fetch_so101_model.py
+urdf_path = /path/to/inspect-robots/.so101/models/SO101/so101_new_calib.urdf
+# camera_extrinsics = /path/to/inspect-robots/.so101/front_camera_to_base.json
+ik_position_tolerance_m = 0.005
+ik_orientation_weight = 0.1
+
+[policy.args]
+ik = embodiment           # SO-101 placo IK in degrees; no Pyroki server needed
+camera = front            # RealSense image used by segment() and plan_grasp()
+sam3_url = http://127.0.0.1:8114
+graspnet_url = http://127.0.0.1:8115
+max_llm_calls = 60        # closed-loop mode (no extrinsics) needs extra probe/correct turns
+max_speed_frac = 0.05
+gripper_speed_frac = 0.5  # full open/close in ~2 s (21 steps) instead of ~20 s
+max_code_failures = 3
+image_horizon = 2         # keep frames from the newest 2 observations (Claude Code 10 MB input cap)
+transcript_echo = true
+prior_learnings = /path/to/inspect-robots/.so101/capx-rig-notes.md   # rig-specific camera/geometry notes for the model
