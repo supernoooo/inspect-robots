@@ -100,6 +100,7 @@ ignore = ["B008", "D105", "D107"]
 "tests/**" = ["D1"]
 "examples/**" = ["D1"]
 "_so101_instructions/test_*.py" = ["D1"]
+"_yam_instructions/test_*.py" = ["D1"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["inspect_robots"]

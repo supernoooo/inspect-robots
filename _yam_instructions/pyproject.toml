@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspect-robots-yam-configured"
+version = "0.1.0"
+description = "I2RT YAM rig configuration for the CaP-X code-as-policy pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "inspect-robots>=0.58",
+  "inspect-robots-capx>=0.3",
+  "inspect-robots-yam[depth]>=0.36",
+  "mink>=0.0.7",
+  "mujoco>=3.3.1",
+]
+
+[project.entry-points."inspect_robots.embodiments"]
+yam_capx_configured = "_run_yam:configured_yam_capx"
+
+[tool.setuptools]
+py-modules = ["_run_yam", "_yam_capx"]

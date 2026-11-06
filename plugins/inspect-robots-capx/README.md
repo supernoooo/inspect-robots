@@ -81,6 +81,23 @@ Pyroki solves in its URDF base frame. This plugin treats world and robot base
 as the same frame. Match the server's robot model, the embodiment's action
 dimensions, and the task's coordinates.
 
+## Embodiment adapter base:
+
+`inspect_robots_capx.embodiment.CapxArmEmbodiment` wraps an existing
+joint-space embodiment and adds everything `-P ik=embodiment` needs: the
+`depth`, `intrinsics`, and optional `extrinsics` extras, the measured tool
+pose as `eef_pos` and `eef_quat_wxyz` state, `eef_rotation`, and
+`solve_ik(position, quaternion_wxyz, seed)` published as `ik_solver`. The
+base owns the solver loop (orientation weight relaxed tenfold per pass until
+the position fits, then tolerance, joint-limit, and orientation-residual
+checks), the observation augmentation, the closed-loop prompt notes, and the
+reset/step/close lifecycle. A robot package subclasses it and supplies only
+`_fk()`, `_iterate_ik()`, and `_kinematics_docs()`; a multi-arm robot also
+overrides `_base_info()`, `_project()`, and `_expand()` to present one arm.
+The repository's `_so101_instructions` (placo URDF kinematics, LeRobot
+RealSense depth) and `_yam_instructions` (mink over i2rt's MuJoCo model, one
+of two arms) packages are the two reference subclasses.
+
 ## Depth and camera metadata:
 
 Core observations carry RGB images, but do not reserve a depth slot. An

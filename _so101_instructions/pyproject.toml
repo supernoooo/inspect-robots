@@ -9,6 +9,7 @@ description = "SO-101 rig configuration using the official robocurve plugin"
 requires-python = ">=3.12"
 dependencies = [
   "inspect-robots>=0.58",
+  "inspect-robots-capx>=0.3",
   "inspect-robots-so101[lerobot] @ git+https://github.com/robocurve/inspect-robots-so101@096d89e12a9e31228fa57a7e5b7d236b09f3db6e",
   "placo>=0.9.6,<0.9.16",
   "cmeel-urdfdom>=4,<5",

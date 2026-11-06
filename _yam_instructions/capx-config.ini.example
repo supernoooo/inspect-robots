@@ -1,0 +1,68 @@
+# CaP-X code-as-policy on one I2RT YAM arm (policy capx, embodiment yam_capx_configured).
+# Copy to .yam/capx.ini (gitignored) and replace every <...> placeholder; see
+# docs/cookbooks/capx-on-yam.md. Args sections apply only to the components
+# named in [defaults].
+
+[defaults]
+policy = capx
+embodiment = yam_capx_configured
+scorer = operator
+grader = operator
+max_steps = 2000          # 200 s at 10 Hz: closed-loop grasps probe, align and may retry
+rerun = true
+rerun_save = true
+store_frames = true
+
+[embodiment.args]
+# Which arm the model drives; the other arm holds its start pose for the trial.
+arm = left
+# CAN channels (ip link show); the setup wizard fills these too.
+left_channel = <LEFT_CAN_CHANNEL>
+right_channel = <RIGHT_CAN_CHANNEL>
+gripper_type = LINEAR_4310
+control_hz = 10.0
+# SAM3 works far better at camera resolution than at the 224x224 VLA default;
+# intrinsics are rescaled to this size automatically.
+cam_width = 640
+cam_height = 480
+# RealSense serials (rs-enumerate-devices). A *_depth_serial slot serves colour
+# AND aligned depth; depth_camera must name one of them. Quote all-digit serials.
+top_depth_serial = "<TOP_REALSENSE_SERIAL>"
+left_depth_serial = "<LEFT_REALSENSE_SERIAL>"
+right_depth_serial = "<RIGHT_REALSENSE_SERIAL>"
+depth_camera = top_cam
+# Operator flow: Enter before the home ramp and before the trial; Esc ends it.
+auto_start = false
+unattended = false
+# Zero-joint, open-gripper home and park (the YAM factory default). Replace
+# with a rig-validated 14-value pose [left_j0..j5, left_gripper, right_j0..j5,
+# right_gripper] (radians, grippers 0 closed .. 1 open) if your rig needs one.
+# home_pose = <14 VALUES>
+# rest_pose = <14 VALUES>
+rest_secs = 3.0
+settle_tolerance = 0.02    # radians; wait for the arm to stop before observing
+# Collision guardrail (MuJoCo) reviews the full two-arm command with the idle
+# arm held; measure collision_*_base_pos first or it may hold on false positives.
+collision_guardrail = false
+motor_temp_limit = 70
+report_joint_eff = false
+# CaP-X additions. camera_extrinsics: 4x4 camera-to-base JSON/.npy (meters) of
+# depth_camera in the DRIVEN arm's base frame. Leave it unset for closed-loop
+# mode: the model then locates objects relative to the gripper and corrects
+# each turn.
+# camera_extrinsics = /path/to/inspect-robots/.yam/top_camera_to_left_base.json
+ik_position_tolerance_m = 0.005
+ik_orientation_weight = 0.1
+
+[policy.args]
+ik = embodiment           # mink IK over i2rt's YAM model in radians; no Pyroki server needed
+camera = top_cam          # RealSense image used by segment() and plan_grasp()
+sam3_url = http://127.0.0.1:8114
+graspnet_url = http://127.0.0.1:8115
+max_llm_calls = 60        # closed-loop mode (no extrinsics) needs extra probe/correct turns
+max_speed_frac = 0.03     # about 0.02 rad (1 deg) per 10 Hz step over the +/-pi joint range
+gripper_speed_frac = 0.5  # the gripper stroke is capped by YAM's gripper_stroke_s anyway
+max_code_failures = 3
+image_horizon = 2         # keep frames from the newest 2 observations
+transcript_echo = true
+prior_learnings = /path/to/inspect-robots/.yam/capx-rig-notes.md   # rig-specific camera/geometry notes for the model

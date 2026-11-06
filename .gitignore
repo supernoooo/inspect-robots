@@ -230,3 +230,6 @@ logs/
 
 # Per-rig SO-101 state: device config, rig notes, calibration, downloaded models.
 .so101/
+
+# Per-rig YAM state for the CaP-X pipeline: device config, rig notes, calibration.
+.yam/
