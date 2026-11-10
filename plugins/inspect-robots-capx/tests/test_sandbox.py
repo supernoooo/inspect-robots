@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from conftest import CapxStub
@@ -16,6 +17,8 @@ from inspect_robots_capx._codec import npy_b64_decode
 from inspect_robots_capx._motion import MotionQueue
 from inspect_robots_capx._sandbox import CodeSandbox
 from inspect_robots_capx._servers import CapxServerClients
+
+_Vec = npt.NDArray[np.float64]
 
 
 def _sandbox(capx_stub: CapxStub) -> tuple[CodeSandbox, MotionQueue, CapxServerClients]:
@@ -171,3 +174,108 @@ def test_obs_get_propagates_errors_raised_inside_thunks(capx_stub: CapxStub) -> 
 
     assert result.raised is True
     assert "embodiment thunk bug" in result.stderr
+
+
+def _embodiment_sandbox(capx_stub: CapxStub) -> tuple[CodeSandbox, MotionQueue]:
+    sandbox, motion, servers = _sandbox(capx_stub)
+    del sandbox
+    return (
+        CodeSandbox(
+            servers=servers,
+            motion=motion,
+            camera="front",
+            state_key="joint_pos",
+            ik="embodiment",
+        ),
+        motion,
+    )
+
+
+def test_embodiment_ik_seeds_from_chained_cursor_and_hides_solver_from_obs(
+    capx_stub: CapxStub,
+) -> None:
+    seeds: list[list[float]] = []
+
+    def solver(position: _Vec, quaternion: _Vec, seed: _Vec) -> _Vec:
+        seeds.append(seed.tolist())
+        return np.array([0.5, 0.25])
+
+    sandbox, _ = _embodiment_sandbox(capx_stub)
+    sandbox.set_observation(_observation(ik_solver=solver))
+
+    result = sandbox.execute(
+        "import numpy as np\n"
+        "q = np.array([1.0, 0, 0, 0])\n"
+        "move_to_joints(np.array([0.1, 0.2]))\n"
+        "move_to_joints(solve_ik([0.1, 0.2, 0.3], q))\n"
+        "print('ik_solver' in obs)"
+    )
+
+    assert result.raised is False, result.stderr
+    assert result.stdout == "False\n"
+    assert seeds == [[0.1, 0.2]]
+    assert capx_stub.requests == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "code", "message"),
+    [
+        ({}, "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]))", "needs observation.extra"),
+        (
+            {"ik_solver": lambda *_: np.zeros(2)},
+            "solve_ik(np.zeros(2), np.array([1.0, 0, 0, 0]))",
+            "position shape",
+        ),
+        (
+            {"ik_solver": lambda *_: np.zeros(3)},
+            "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]))",
+            "expected 2 finite arm joints",
+        ),
+        (
+            {"ik_solver": lambda *_: np.array([np.nan, 0.0])},
+            "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]))",
+            "expected 2 finite arm joints",
+        ),
+    ],
+    ids=["missing", "bad_position", "bad_shape", "non_finite"],
+)
+def test_embodiment_ik_errors_become_stderr_feedback(
+    capx_stub: CapxStub, extra: dict[str, Any], code: str, message: str
+) -> None:
+    sandbox, motion = _embodiment_sandbox(capx_stub)
+    sandbox.set_observation(_observation(**extra))
+
+    result = sandbox.execute("import numpy as np\n" + code)
+
+    assert result.raised is True
+    assert message in result.stderr
+    assert motion.has_actions() is False
+
+
+def test_unknown_ik_backend_is_rejected(capx_stub: CapxStub) -> None:
+    _, motion, servers = _sandbox(capx_stub)
+    with pytest.raises(ValueError, match="ik must be one of"):
+        CodeSandbox(servers=servers, motion=motion, camera="front", state_key="joint_pos", ik="x")
+
+
+def test_segment_can_target_another_camera_and_names_the_missing_one(
+    capx_stub: CapxStub,
+) -> None:
+    sandbox, _, _ = _sandbox(capx_stub)
+    sandbox.set_observation(
+        Observation(
+            images={
+                "front": np.zeros((2, 2, 3), dtype=np.uint8),
+                "wrist": np.full((2, 2, 3), 255, dtype=np.uint8),
+            },
+            state={"joint_pos": np.array([0.0, 0.0, 1.0])},
+        )
+    )
+
+    ok = sandbox.execute("print(len(segment('cube', camera='wrist')))")
+    missing = sandbox.execute("segment('cube', camera='top')")
+
+    assert ok.stdout == "1\n", ok.stderr
+    assert capx_stub.requests[0][1]["image_base64"] != ""
+    assert missing.raised is True
+    assert "no camera 'top'; available: ['front', 'wrist']" in missing.stderr

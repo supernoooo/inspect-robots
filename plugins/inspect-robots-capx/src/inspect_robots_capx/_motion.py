@@ -34,6 +34,7 @@ class MotionQueue:
         max_speed_frac: float,
         gripper_index: int,
         gripper_open_is_high: bool = True,
+        gripper_speed_frac: float | None = None,
     ) -> None:
         if len(action_space.shape) != 1:
             raise ValueError(f"motion needs a 1-D action box, got {action_space.shape}")
@@ -41,6 +42,10 @@ class MotionQueue:
             raise ValueError("control_hz must be finite and > 0")
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ValueError("max_speed_frac must be finite and > 0")
+        if gripper_speed_frac is not None and (
+            not np.isfinite(gripper_speed_frac) or gripper_speed_frac <= 0
+        ):
+            raise ValueError("gripper_speed_frac must be finite and > 0")
         if not 0 <= gripper_index < action_space.dim:
             raise ValueError(f"gripper index {gripper_index} is outside {action_space.dim}-D box")
         low = action_space.low
@@ -80,10 +85,15 @@ class MotionQueue:
                 "bounds are too coarse at this magnitude for speed-limited "
                 "interpolation (float spacing exceeds the per-step budget)"
             )
-        step_frac = min(max_speed_frac / control_hz, _BACKSTOP_STEP_FRAC)
-        step_limits = np.minimum(step_frac * float64_range, native_backstop)
-        declared_scale = min(max_speed_frac / _DEFAULT_SPEED_FRAC, 1.0)
-        step_limits[declared_mask] = effective_budget[declared_mask] * declared_scale
+        # The gripper may ramp at its own speed (open/close is a short, low-risk
+        # travel); both speeds stay under the same per-step backstop.
+        speeds = np.full(action_space.dim, max_speed_frac, dtype=np.float64)
+        if gripper_speed_frac is not None:
+            speeds[gripper_index] = gripper_speed_frac
+        step_fracs = np.minimum(speeds / control_hz, _BACKSTOP_STEP_FRAC)
+        step_limits = np.minimum(step_fracs * float64_range, native_backstop)
+        declared_scales = np.minimum(speeds / _DEFAULT_SPEED_FRAC, 1.0)
+        step_limits[declared_mask] = (effective_budget * declared_scales)[declared_mask]
         if bool(np.any(movable & (step_limits <= 0))):
             raise ValueError("speed fraction underflows the per-step limit for a movable dimension")
 
@@ -110,6 +120,11 @@ class MotionQueue:
     def cursor(self) -> npt.NDArray[np.float64] | None:
         """Return a defensive copy of the current queued endpoint, if seeded."""
         return None if self._cursor is None else self._cursor.copy()
+
+    @property
+    def arm_cursor(self) -> npt.NDArray[np.float64]:
+        """Return the queued endpoint's arm joints; raises before a turn is seeded."""
+        return self._require_cursor()[list(self._arm_indices)].copy()
 
     def reset(self) -> None:
         """Clear queued actions and the observation-derived cursor."""

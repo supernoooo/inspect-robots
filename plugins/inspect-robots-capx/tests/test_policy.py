@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from conftest import CapxStub
@@ -31,6 +33,7 @@ from inspect_robots_capx import CapxPolicy, CapxPolicyConfig, capx_policy
 from inspect_robots_capx.policy import (
     _EXECUTION_REPORT_CHAR_LIMIT,
     _HELPER_DOCS,
+    _IK_NOTES,
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _REPORT_TRUNCATION_MARKER,
     _SYSTEM_TEMPLATE,
@@ -40,6 +43,8 @@ _PRIOR_LEARNINGS_FRAME = (
     "\n\nNotes from a previous attempt at tasks like this one. They may "
     "be wrong or stale; the current observation always wins:\n"
 )
+
+_Vec = npt.NDArray[np.float64]
 
 
 def _completion(content: str) -> dict[str, Any]:
@@ -185,6 +190,7 @@ def test_prior_learnings_default_off_preserves_prompt_and_config() -> None:
                 depth_key="depth",
                 intrinsics_key="intrinsics",
                 extrinsics_key="extrinsics",
+                ik_note=_IK_NOTES["pyroki"],
             ),
         )
         + "\n\nEmbodiment notes:\n"
@@ -322,7 +328,16 @@ def test_control_words_return_one_action_stop_hold(word: str) -> None:
 
 @pytest.mark.parametrize(
     ("reply", "reason"),
-    [("FINISH.", "FINISH"), ("GIVE_UP!", "GIVE_UP"), ("finish", "FINISH")],
+    [
+        ("FINISH.", "FINISH"),
+        ("GIVE_UP!", "GIVE_UP"),
+        ("finish", "FINISH"),
+        (
+            "FINISH\n\nBoth masks were segmented; the block is at 0.633 m (u 284\u2013325).",
+            "FINISH",
+        ),
+        ("  GIVE_UP\nThe gripper is never visible.", "GIVE_UP"),
+    ],
 )
 def test_control_words_tolerate_punctuation_and_case(reply: str, reason: str) -> None:
     policy = _bound_policy(_ScriptedTransport([_completion(reply)]))
@@ -677,3 +692,154 @@ def test_registry_entry_point_resolves_and_factory_forwards_kwargs() -> None:
     assert resolved.config.max_llm_calls == 9
     direct.close()
     resolved.close()
+
+
+def test_embodiment_ik_routes_to_extra_solver_and_is_recorded() -> None:
+    seeds: list[_Vec] = []
+
+    def solver(position: _Vec, quaternion: _Vec, seed: _Vec) -> _Vec:
+        seeds.append(seed.copy())
+        return np.array([0.3, -0.2])
+
+    script = _ScriptedTransport(
+        [
+            _completion(
+                "import numpy as np\n"
+                "move_to_joints(solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0])))"
+            )
+        ]
+    )
+    policy = _bound_policy(script, ik="embodiment")
+    observation = Observation(
+        images={},
+        state={"joint_pos": np.array([0.1, 0.0, 1.0])},
+        extra={"ik_solver": solver},
+    )
+
+    chunk = policy.act(observation)
+
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.ik == "embodiment"
+    assert policy.config.ik_key == "ik_solver"
+    assert _IK_NOTES["embodiment"] in str(script.llm_requests[0]["messages"][0]["content"])
+    assert [seed.tolist() for seed in seeds] == [[0.1, 0.0]]
+    assert np.array_equal(chunk.actions[-1].data, np.array([0.3, -0.2, 1.0]))
+    assert script.capx.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [({"ik": "curobo"}, "ik must be one of"), ({"ik_key": ""}, "ik_key must be")],
+)
+def test_invalid_ik_options_raise_guided_config_error(kwargs: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _policy(_ScriptedTransport([]), **kwargs)
+
+
+def test_image_horizon_evicts_older_frames_from_requests() -> None:
+    move = _completion("import numpy as np\nmove_to_joints(np.array([0.1, 0.0]))")
+    script = _ScriptedTransport([move, move, move])
+    policy = _bound_policy(script, image_horizon=2)
+
+    for _ in range(3):
+        policy.act(_observation(image=True))
+
+    def image_turns(request: dict[str, Any]) -> int:
+        return sum(
+            any(part.get("type") == "image_url" for part in message["content"])
+            for message in request["messages"]
+            if isinstance(message.get("content"), list)
+        )
+
+    assert [image_turns(request) for request in script.llm_requests] == [1, 2, 2]
+    assert "older camera frame" in json.dumps(script.llm_requests[2]["messages"])
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.image_horizon == 2
+
+
+@pytest.mark.parametrize("value", [0, True, 1.5])
+def test_image_horizon_must_be_a_positive_integer(value: object) -> None:
+    with pytest.raises(ConfigError, match="image_horizon"):
+        _policy(_ScriptedTransport([]), image_horizon=value)
+
+
+def test_stop_word_with_trailing_summary_runs_no_code_and_keeps_the_summary() -> None:
+    reply = "FINISH\n\n- **Block:** score 0.969 at (304, 309), depth 0.633 m."
+    script = _ScriptedTransport([_completion(reply)])
+    policy = _bound_policy(script)
+
+    chunk = policy.act(_observation())
+
+    assert chunk.actions[0].meta["stop_reason"] == "FINISH"
+    assert len(script.llm_requests) == 1
+    transcript = policy.transcript()
+    assert transcript is not None and transcript[-1]["content"] == reply
+    assert policy._consecutive_failures == 0
+
+
+def test_gripper_speed_frac_is_recorded_and_validated() -> None:
+    policy = _bound_policy(_ScriptedTransport([]), gripper_speed_frac=0.5)
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.gripper_speed_frac == 0.5
+    with pytest.raises(ConfigError, match="gripper_speed_frac"):
+        _policy(_ScriptedTransport([]), gripper_speed_frac=True)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Hovering at z \u2248 0.02 m; the block sits low.\n\nREGENERATE\n"
+        "move_to_joints(np.array([0.2, 0.0]))",
+        "Retrying.\nREGENERATE\n```python\nmove_to_joints(np.array([0.2, 0.0]))\n```",
+        "Plan:\nREGENERATE\nignored = 1\nREGENERATE\nmove_to_joints(np.array([0.2, 0.0]))",
+    ],
+    ids=["prose_then_code", "prose_then_fence", "last_marker_wins"],
+)
+def test_commentary_before_regenerate_is_not_executed(reply: str) -> None:
+    script = _ScriptedTransport([_completion("import numpy as np"), _completion(reply)])
+    policy = _bound_policy(script)
+
+    chunk = policy.act(_observation())
+
+    assert np.array_equal(chunk.actions[-1].data, np.array([0.2, 0.0, 1.0]))
+    assert policy._consecutive_failures == 0
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "The jaw overshot, so I will correct back.\n\nimport numpy as np\n"
+        "move_to_joints(np.array([0.2, 0.0]))",
+        "I will rise first; it\u2019s safer.\nmove_to_joints(np.array([0.2, 0.0]))",
+    ],
+    ids=["prose_paragraph", "unicode_apostrophe"],
+)
+def test_leading_prose_without_markers_is_dropped_only_when_it_breaks_compilation(
+    reply: str,
+) -> None:
+    script = _ScriptedTransport([_completion("import numpy as np"), _completion(reply)])
+    policy = _bound_policy(script)
+
+    chunk = policy.act(_observation())
+
+    assert np.array_equal(chunk.actions[-1].data, np.array([0.2, 0.0, 1.0]))
+    assert policy._consecutive_failures == 0
+
+
+def test_uncompilable_reply_is_left_for_the_model_to_see() -> None:
+    script = _ScriptedTransport([_completion("move_to_joints(("), _completion("FINISH")])
+    policy = _bound_policy(script)
+
+    policy.act(_observation())
+
+    transcript = policy.transcript()
+    assert transcript is not None
+    assert "SyntaxError" in str(transcript[-2]["content"])
+
+
+def test_claude_code_wire_without_the_cli_client_is_a_guided_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "inspect_robots_agent._claude_code", None)
+    with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
+        CapxPolicy(model="anthropic/claude-opus-5-5", wire="claude-code", env={})

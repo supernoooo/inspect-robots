@@ -30,6 +30,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
+# URDF forward kinematics and IK for hosts without an embodiment solver
+# (ArmKinematics); pins match the SO-101 rig package.
+kinematics = ["placo>=0.9.6,<0.9.16", "cmeel-urdfdom>=4,<5", "cmeel-tinyxml2<11"]
 
 [project.entry-points."inspect_robots.policies"]
 capx = "inspect_robots_capx.policy:capx_policy"
