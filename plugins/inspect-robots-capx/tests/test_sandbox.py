@@ -14,7 +14,7 @@ from conftest import CapxStub
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.types import Observation
 from inspect_robots_capx._codec import npy_b64_decode
-from inspect_robots_capx._motion import MotionQueue
+from inspect_robots_capx._motion import ArmLayout, MotionQueue
 from inspect_robots_capx._sandbox import CodeSandbox
 from inspect_robots_capx._servers import CapxServerClients
 
@@ -279,3 +279,140 @@ def test_segment_can_target_another_camera_and_names_the_missing_one(
     assert capx_stub.requests[0][1]["image_base64"] != ""
     assert missing.raised is True
     assert "no camera 'top'; available: ['front', 'wrist']" in missing.stderr
+
+
+def _two_arm_sandbox(
+    capx_stub: CapxStub, ik: str = "embodiment"
+) -> tuple[CodeSandbox, MotionQueue]:
+    space = Box(
+        shape=(6,),
+        low=np.array([-1.0, -1.0, 0.0, -1.0, -1.0, 0.0]),
+        high=np.ones(6),
+        semantics=ActionSemantics(
+            "joint_pos",
+            gripper="continuous",
+            dim_labels=(
+                "left_j0",
+                "left_j1",
+                "left_gripper",
+                "right_j0",
+                "right_j1",
+                "right_gripper",
+            ),
+        ),
+    )
+    motion = MotionQueue(
+        space,
+        control_hz=10.0,
+        max_speed_frac=0.1,
+        arms=(ArmLayout("left", (0, 1), 2), ArmLayout("right", (3, 4), 5)),
+    )
+    servers = CapxServerClients(
+        sam3_url="http://sam.test",
+        graspnet_url="http://grasp.test",
+        pyroki_url="http://ik.test",
+        transport=httpx.MockTransport(capx_stub.handler),
+    )
+    sandbox = CodeSandbox(
+        servers=servers, motion=motion, camera="front", state_key="joint_pos", ik=ik
+    )
+    return sandbox, motion
+
+
+def _two_arm_observation(**extra: Any) -> Observation:
+    return Observation(
+        images={"front": np.zeros((2, 2, 3), dtype=np.uint8)},
+        state={"joint_pos": np.array([0.1, 0.2, 1.0, 0.3, 0.4, 1.0])},
+        extra=extra,
+    )
+
+
+def test_multi_arm_ik_routes_to_the_named_arm_solver_with_its_own_seed(
+    capx_stub: CapxStub,
+) -> None:
+    calls: list[tuple[str, list[float]]] = []
+
+    def solver_for(arm: str, joints: list[float]) -> Callable[[_Vec, _Vec, _Vec], _Vec]:
+        def solver(position: _Vec, quaternion: _Vec, seed: _Vec) -> _Vec:
+            calls.append((arm, seed.tolist()))
+            return np.array(joints)
+
+        return solver
+
+    sandbox, motion = _two_arm_sandbox(capx_stub)
+    sandbox.set_observation(
+        _two_arm_observation(
+            ik_solver={
+                "left": solver_for("left", [0.0, 0.1]),
+                "right": solver_for("right", [0.5, 0.4]),
+            }
+        )
+    )
+
+    result = sandbox.execute(
+        "import numpy as np\n"
+        "q = np.array([1.0, 0, 0, 0])\n"
+        "move_arms(left=solve_ik([0.1, 0.2, 0.3], q, arm='left'),\n"
+        "          right=solve_ik([0.1, -0.2, 0.3], q, arm='right'))\n"
+        "close_gripper(arm='left')\n"
+        "print(sorted(k for k in globals() if not k.startswith('_')))"
+    )
+
+    assert result.raised is False, result.stderr
+    assert calls == [("left", [0.1, 0.2]), ("right", [0.3, 0.4])]
+    assert "move_arms" in result.stdout
+    assert motion.cursor is not None
+    assert motion.cursor.tolist() == pytest.approx([0.0, 0.1, 0.0, 0.5, 0.4, 1.0])
+    assert capx_stub.requests == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "code", "message"),
+    [
+        (
+            {"ik_solver": lambda *_: np.zeros(2)},
+            "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]), arm='left')",
+            "mapping from arm name",
+        ),
+        (
+            {"ik_solver": {"left": lambda *_: np.zeros(2)}},
+            "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]), arm='right')",
+            "none for arm 'right'",
+        ),
+        (
+            {"ik_solver": {"left": lambda *_: np.zeros(2)}},
+            "solve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]))",
+            "name the arm",
+        ),
+        (
+            {},
+            "move_to_joints(np.zeros(2))",
+            "name the arm",
+        ),
+    ],
+    ids=["callable_not_mapping", "missing_arm_solver", "ik_without_arm", "move_without_arm"],
+)
+def test_multi_arm_helper_errors_become_stderr_feedback(
+    capx_stub: CapxStub, extra: dict[str, Any], code: str, message: str
+) -> None:
+    sandbox, motion = _two_arm_sandbox(capx_stub)
+    sandbox.set_observation(_two_arm_observation(**extra))
+
+    result = sandbox.execute("import numpy as np\n" + code)
+
+    assert result.raised is True
+    assert message in result.stderr
+    assert motion.has_actions() is False
+
+
+def test_multi_arm_rejects_pyroki_ik_and_single_arm_has_no_move_arms(capx_stub: CapxStub) -> None:
+    sandbox, _ = _two_arm_sandbox(capx_stub, ik="pyroki")
+    sandbox.set_observation(_two_arm_observation())
+    result = sandbox.execute(
+        "import numpy as np\nsolve_ik(np.zeros(3), np.array([1.0, 0, 0, 0]), arm='left')"
+    )
+    assert result.raised is True and "ik='pyroki' solves a single arm" in result.stderr
+
+    single, _, _ = _sandbox(capx_stub)
+    single.set_observation(_observation())
+    assert single.execute("move_arms").raised is True

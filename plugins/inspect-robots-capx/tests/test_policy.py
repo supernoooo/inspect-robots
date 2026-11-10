@@ -34,6 +34,7 @@ from inspect_robots_capx.policy import (
     _EXECUTION_REPORT_CHAR_LIMIT,
     _HELPER_DOCS,
     _IK_NOTES,
+    _MULTI_ARM_HELPER_DOCS,
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _REPORT_TRUNCATION_MARKER,
     _SYSTEM_TEMPLATE,
@@ -843,3 +844,118 @@ def test_claude_code_wire_without_the_cli_client_is_a_guided_error(
     monkeypatch.setitem(sys.modules, "inspect_robots_agent._claude_code", None)
     with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
         CapxPolicy(model="anthropic/claude-opus-5-5", wire="claude-code", env={})
+
+
+_TWO_ARM_LABELS = ("left_j0", "left_j1", "left_gripper", "right_j0", "right_j1", "right_gripper")
+
+
+def _two_arm_info(labels: tuple[str, ...] = _TWO_ARM_LABELS) -> EmbodimentInfo:
+    return EmbodimentInfo(
+        name="two-arm-test",
+        action_space=Box(
+            shape=(6,),
+            low=np.array([-1.0, -1.0, 0.0, -1.0, -1.0, 0.0]),
+            high=np.ones(6),
+            semantics=ActionSemantics("joint_pos", gripper="continuous", dim_labels=labels),
+        ),
+        observation_space=ObservationSpace(
+            cameras=(CameraSpec("front", 2, 2),),
+            state=StateSpec(fields=(StateField("joint_pos", (6,)), StateField("grip", (2,)))),
+        ),
+        control_hz=10.0,
+        is_simulated=True,
+        docs="Two arms side by side.",
+    )
+
+
+def test_multi_arm_bind_describes_every_arm_and_documents_arm_helpers() -> None:
+    policy = _policy(_ScriptedTransport([]), ik="embodiment")
+    policy.bind(_two_arm_info())
+    policy.reset(Scene(id="s0", instruction="hand over the cube"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    system = transcript[0]["content"]
+    assert (
+        "joint_pos with 2 arms (arm 'left': 2 joints ['left_j0', 'left_j1'], gripper dim 2; "
+        "arm 'right': 2 joints ['right_j0', 'right_j1'], gripper dim 5); grippers "
+        "high=open, low=closed, control_hz=10"
+    ) in system
+    assert (
+        _MULTI_ARM_HELPER_DOCS.format(
+            arms="'left', 'right'",
+            arm_example="left=..., right=...",
+            depth_key="depth",
+            intrinsics_key="intrinsics",
+            extrinsics_key="extrinsics",
+            ik_note=_IK_NOTES["embodiment"],
+        )
+        in system
+    )
+    assert "move_arms(left=..., right=...)" in system
+    policy.close()
+
+
+def test_multi_arm_turn_queues_a_synchronized_two_arm_chunk() -> None:
+    def left(position: _Vec, quaternion: _Vec, seed: _Vec) -> _Vec:
+        return np.array([0.2, 0.0])
+
+    def right(position: _Vec, quaternion: _Vec, seed: _Vec) -> _Vec:
+        return np.array([0.0, -0.2])
+
+    script = _ScriptedTransport(
+        [
+            _completion(
+                "import numpy as np\n"
+                "q = np.array([1.0, 0, 0, 0])\n"
+                "move_arms(left=solve_ik(np.zeros(3), q, arm='left'),\n"
+                "          right=solve_ik(np.zeros(3), q, arm='right'))\n"
+                "close_gripper(arm='right')"
+            )
+        ]
+    )
+    policy = _policy(script, ik="embodiment")
+    policy.bind(_two_arm_info())
+    policy.reset(Scene(id="s0", instruction="hand over"))
+    observation = Observation(
+        images={},
+        state={"joint_pos": np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0]), "grip": np.ones(2)},
+        extra={"ik_solver": {"left": left, "right": right}},
+    )
+
+    chunk = policy.act(observation)
+
+    data = np.stack([action.data for action in chunk.actions])
+    assert np.array_equal(data[-1], [0.2, 0.0, 1.0, 0.0, -0.2, 0.0])
+    reached = int(np.argmax(np.all(np.isclose(data[:, [0, 4]], [0.2, -0.2]), axis=1)))
+    assert np.all(data[: reached + 1, 5] == 1.0)  # the gripper closes after the arms arrive
+    state = str(script.llm_requests[0]["messages"][2]["content"])
+    assert "left_gripper=1.0" in state and "right_j1=0.0" in state
+    policy.close()
+
+
+@pytest.mark.parametrize(
+    ("labels", "kwargs", "message"),
+    [
+        (_TWO_ARM_LABELS, {}, "ik='embodiment' for a multi-arm embodiment"),
+        (
+            ("left_j0", "left_j1", "left_gripper", "right_j0", "j1", "right_gripper"),
+            {"ik": "embodiment"},
+            "start with exactly one arm prefix",
+        ),
+        (
+            ("left_j0", "left_j1", "left_gripper", "left_j2", "left_j3", "right_gripper"),
+            {"ik": "embodiment"},
+            "at least one joint for arm 'right'",
+        ),
+    ],
+    ids=["pyroki", "unprefixed_label", "jointless_arm"],
+)
+def test_multi_arm_bind_rejects_invalid_profiles(
+    labels: tuple[str, ...], kwargs: dict[str, Any], message: str
+) -> None:
+    policy = _policy(_ScriptedTransport([]), **kwargs)
+
+    with pytest.raises(ValueError, match=rf"plan 0021 CaP-X v1 profile requires .*{message}"):
+        policy.bind(_two_arm_info(labels))

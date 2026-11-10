@@ -37,7 +37,7 @@ from inspect_robots_agent import (
     png_data_url,
     resolve_provider,
 )
-from inspect_robots_capx._motion import MotionQueue
+from inspect_robots_capx._motion import ArmLayout, MotionQueue
 from inspect_robots_capx._sandbox import IK_BACKENDS, CodeSandbox, ExecutionResult
 from inspect_robots_capx._servers import CapxServerClients
 
@@ -91,6 +91,43 @@ arrays or zero-argument callables; `obs[...]` access and the helper functions
 resolve callable values automatically.
 """
 
+_MULTI_ARM_HELPER_DOCS = """Helpers available in the persistent namespace:
+
+segment(text: str, camera: str | None = None) -> list[dict]
+    Segment the configured camera (or another named camera) with SAM3. Each
+    result has a boolean `mask`, `box`, `score`, and `label`. Results include
+    many low-confidence candidates: sort by `score` and treat a best score
+    below about 0.3 as "not found". Depth and plan_grasp() are aligned to the
+    configured camera only.
+plan_grasp(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]
+    Return (K, 4, 4) grasp poses in the camera frame and (K,) scores. K may be
+    zero. Use `obs["{extrinsics_key}"] @ pose` to transform a pose into the
+    robot-base frame. World and robot base are treated as the same frame.
+
+This embodiment has several arms: {arms}. Every arm and gripper helper names
+its arm with `arm=`, one of those names.
+
+solve_ik(position: np.ndarray, quaternion_wxyz: np.ndarray, arm: str) -> np.ndarray
+    Return that arm's joint vector expected by move_to_joints. {ik_note}
+move_to_joints(joints: np.ndarray, arm: str) -> None
+    Queue a speed-limited move of one arm while every other arm and every
+    gripper holds.
+move_arms(**joints_by_arm: np.ndarray) -> None
+    Queue one synchronized move of several arms, e.g. move_arms({arm_example}),
+    that starts and ends together; arms you do not name hold.
+open_gripper(arm: str) / close_gripper(arm: str) -> None
+    Queue a speed-limited ramp of that arm's gripper while everything else holds.
+
+Queued moves run one after another in call order; use move_arms when arms
+must move at the same time.
+
+`obs` is the current turn's dict with `images`, `state`, and every
+observation.extra entry. Depth (`{depth_key}`), intrinsics (`{intrinsics_key}`),
+and extrinsics (`{extrinsics_key}`) may be provided by the embodiment as
+arrays or zero-argument callables; `obs[...]` access and the helper functions
+resolve callable values automatically.
+"""
+
 _IK_NOTES = {
     "pyroki": "Solved by the Pyroki server in its URDF base frame.",
     "embodiment": (
@@ -130,6 +167,49 @@ def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "text": "[image omitted: streamed camera frame]",
                 }
     return sanitized
+
+
+_ARM_GRIPPER_SUFFIX = "_gripper"
+
+
+def _arm_layouts(labels: tuple[str, ...] | None, prefix: str) -> list[ArmLayout]:
+    """Return the multi-arm layout ``dim_labels`` declare, or ``[]`` for one arm.
+
+    Labels declare several arms with one ``<arm>_gripper`` entry per arm (two
+    or more) and no bare ``gripper``; every other label must start with
+    exactly one ``<arm>_`` prefix. Arms keep the order of their grippers.
+    """
+    if labels is None or "gripper" in labels:
+        return []
+    grippers = [
+        (index, label.removesuffix(_ARM_GRIPPER_SUFFIX))
+        for index, label in enumerate(labels)
+        if label.endswith(_ARM_GRIPPER_SUFFIX) and label != _ARM_GRIPPER_SUFFIX
+    ]
+    if len(grippers) < 2:
+        return []
+    names = [name for _, name in grippers]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{prefix} one '<arm>_gripper' dim_labels entry per arm; got {names}")
+    joints: dict[str, list[int]] = {name: [] for name in names}
+    gripper_indices = {index for index, _ in grippers}
+    for index, label in enumerate(labels):
+        if index in gripper_indices:
+            continue
+        owners = [name for name in names if label.startswith(f"{name}_")]
+        if len(owners) != 1:
+            raise ValueError(
+                f"{prefix} every multi-arm dim_labels entry to start with exactly one arm "
+                f"prefix {[f'{name}_' for name in names]}; {label!r} matches {owners}"
+            )
+        joints[owners[0]].append(index)
+    for name, indices in joints.items():
+        if not indices:
+            raise ValueError(f"{prefix} at least one joint for arm {name!r}")
+    return [
+        ArmLayout(name=name, joint_indices=tuple(joints[name]), gripper_index=index)
+        for index, name in grippers
+    ]
 
 
 @dataclass(frozen=True)
@@ -407,6 +487,7 @@ class CapxPolicy(PolicyBase):
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
+        self._arms: tuple[str, ...] = ()
         self._action_summary = "unbound; call bind() before act()"
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
@@ -416,7 +497,13 @@ class CapxPolicy(PolicyBase):
         atexit.register(self.close)
 
     def bind(self, embodiment_info: EmbodimentInfo) -> None:
-        """Adopt an embodiment that satisfies the plan-0021 single-arm profile."""
+        """Adopt an embodiment that satisfies the plan-0021 single-arm profile.
+
+        Several arms are accepted too when ``dim_labels`` name one
+        ``<arm>_gripper`` per arm and every other label starts with exactly
+        one ``<arm>_`` prefix (for example ``left_j0 .. left_gripper,
+        right_j0 .. right_gripper``). That profile needs ``ik="embodiment"``.
+        """
         space = embodiment_info.action_space
         prefix = "plan 0021 CaP-X v1 profile requires"
         if len(space.shape) != 1 or space.dim < 2:
@@ -428,7 +515,15 @@ class CapxPolicy(PolicyBase):
         if semantics.gripper == "none":
             raise ValueError(f"{prefix} ActionSemantics.gripper to be continuous or binary")
         labels = semantics.dim_labels
-        if labels is None:
+        arms = _arm_layouts(labels, prefix)
+        gripper_index: int | None = None
+        if arms:
+            if self._ik != "embodiment":
+                raise ValueError(
+                    f"{prefix} ik='embodiment' for a multi-arm embodiment "
+                    f"({', '.join(arm.name for arm in arms)}); Pyroki solves one arm"
+                )
+        elif labels is None:
             gripper_index = space.dim - 1
         else:
             matches = [index for index, label in enumerate(labels) if label == "gripper"]
@@ -475,6 +570,7 @@ class CapxPolicy(PolicyBase):
                 gripper_index=gripper_index,
                 gripper_open_is_high=self._gripper_open_is_high,
                 gripper_speed_frac=self._gripper_speed_frac,
+                arms=arms or None,
             )
         except ValueError as exc:
             raise ValueError(f"{prefix} valid bounded motion arithmetic: {exc}") from exc
@@ -494,18 +590,32 @@ class CapxPolicy(PolicyBase):
         self._state_labels = (state_key, labels) if labels is not None else None
         self._embodiment_name = embodiment_info.name
         self._embodiment_docs = getattr(embodiment_info, "docs", None)
-        arm_labels = [
-            labels[index] if labels is not None else str(index)
-            for index in range(space.dim)
-            if index != gripper_index
-        ]
+        self._arms = tuple(arm.name for arm in arms)
         polarity = (
             "high=open, low=closed" if self._gripper_open_is_high else "low=open, high=closed"
         )
-        self._action_summary = (
-            f"joint_pos with {motion.arm_dof} arm joints {arm_labels}, gripper dim "
-            f"{gripper_index} ({polarity}), control_hz={embodiment_info.control_hz:g}"
-        )
+        if arms:
+            assert labels is not None
+            described = "; ".join(
+                f"arm {arm.name!r}: {len(arm.joint_indices)} joints "
+                f"{[labels[index] for index in arm.joint_indices]}, gripper dim "
+                f"{arm.gripper_index}"
+                for arm in arms
+            )
+            self._action_summary = (
+                f"joint_pos with {len(arms)} arms ({described}); grippers {polarity}, "
+                f"control_hz={embodiment_info.control_hz:g}"
+            )
+        else:
+            arm_labels = [
+                labels[index] if labels is not None else str(index)
+                for index in range(space.dim)
+                if index != gripper_index
+            ]
+            self._action_summary = (
+                f"joint_pos with {motion.arm_dof} arm joints {arm_labels}, gripper dim "
+                f"{gripper_index} ({polarity}), control_hz={embodiment_info.control_hz:g}"
+            )
         self.info = PolicyInfo(
             name="capx",
             action_space=space,
@@ -515,16 +625,25 @@ class CapxPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a trial with fresh code, transcript, failure, and IK state."""
+        keys = {
+            "depth_key": self._depth_key,
+            "intrinsics_key": self._intrinsics_key,
+            "extrinsics_key": self._extrinsics_key,
+            "ik_note": _IK_NOTES[self._ik],
+        }
+        if self._arms:
+            helper_docs = _MULTI_ARM_HELPER_DOCS.format(
+                arms=", ".join(repr(arm) for arm in self._arms),
+                arm_example=", ".join(f"{arm}=..." for arm in self._arms),
+                **keys,
+            )
+        else:
+            helper_docs = _HELPER_DOCS.format(**keys)
         system = _SYSTEM_TEMPLATE.format(
             budget=self._max_llm_calls,
             name=self._embodiment_name,
             action_summary=self._action_summary,
-            helper_docs=_HELPER_DOCS.format(
-                depth_key=self._depth_key,
-                intrinsics_key=self._intrinsics_key,
-                extrinsics_key=self._extrinsics_key,
-                ik_note=_IK_NOTES[self._ik],
-            ),
+            helper_docs=helper_docs,
         )
         if self._embodiment_docs is not None and self._embodiment_docs.strip():
             system += "\n\nEmbodiment notes:\n" + self._embodiment_docs.strip()

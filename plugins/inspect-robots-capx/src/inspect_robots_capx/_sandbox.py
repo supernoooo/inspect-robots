@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -103,6 +104,8 @@ class CodeSandbox:
             "open_gripper": self._motion.open_gripper,
             "close_gripper": self._motion.close_gripper,
         }
+        if self._motion.arms:
+            self._namespace["move_arms"] = self._move_arms
 
     def set_observation(self, observation: Observation) -> None:
         """Expose one turn's observation and reseed motion from its full state field."""
@@ -175,20 +178,34 @@ class CodeSandbox:
             np.asarray(mask),
         )
 
+    def _move_arms(self, **joints_by_arm: npt.NDArray[Any]) -> None:
+        self._motion.move_arms(joints_by_arm)
+
     def _solve_ik(
         self,
         position: npt.NDArray[Any],
         quaternion_wxyz: npt.NDArray[Any],
+        arm: str | None = None,
     ) -> npt.NDArray[np.float64]:
+        # Validates ``arm`` first: required and known on a multi-arm embodiment,
+        # absent on a single arm.
+        dof = self._motion.joint_count(arm)
         if self._ik == "pyroki":
-            return self._servers.pyroki.solve_ik(
-                position,
-                quaternion_wxyz,
-                self._motion.arm_dof,
-            )
+            if self._motion.arms:
+                raise ValueError("ik='pyroki' solves a single arm; use ik='embodiment'")
+            return self._servers.pyroki.solve_ik(position, quaternion_wxyz, dof)
         observation = self._require_observation()
         solver = observation.extra.get(self._ik_key)
-        if not callable(solver):
+        if arm is not None:
+            # Multi-arm embodiments publish one solver per arm name.
+            solver = solver.get(arm) if isinstance(solver, Mapping) else None
+            if not callable(solver):
+                raise KeyError(
+                    f"ik='embodiment' on a multi-arm embodiment needs "
+                    f"observation.extra[{self._ik_key!r}] as a mapping from arm name to a "
+                    f"callable solver(position, quaternion_wxyz, seed); none for arm {arm!r}"
+                )
+        elif not callable(solver):
             raise KeyError(
                 f"ik='embodiment' needs observation.extra[{self._ik_key!r}] as a callable "
                 "solver(position, quaternion_wxyz, seed) returning arm joints"
@@ -200,12 +217,11 @@ class CodeSandbox:
         # Seed from the queued endpoint so chained moves solve from where the
         # arm will be, not from where this turn started.
         joints = np.asarray(
-            solver(position_array, quaternion_array, self._motion.arm_cursor),
+            solver(position_array, quaternion_array, self._motion.arm_joints(arm)),
             dtype=np.float64,
         ).reshape(-1)
-        if joints.shape != (self._motion.arm_dof,) or not bool(np.all(np.isfinite(joints))):
+        if joints.shape != (dof,) or not bool(np.all(np.isfinite(joints))):
             raise ValueError(
-                f"embodiment IK returned shape {joints.shape}; expected "
-                f"{self._motion.arm_dof} finite arm joints"
+                f"embodiment IK returned shape {joints.shape}; expected {dof} finite arm joints"
             )
         return joints

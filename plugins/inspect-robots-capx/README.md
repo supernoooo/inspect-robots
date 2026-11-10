@@ -77,6 +77,24 @@ CaP-X keeps chat-only direct routing, so `thinkingmachines/*` resolves through O
 - `camera=None` selects the sole declared camera. Set `camera=NAME` when the
   embodiment declares several cameras.
 
+### Several arms:
+
+A bimanual (or larger) joint embodiment binds when `dim_labels` has no bare
+`gripper` and instead names one `<arm>_gripper` entry per arm, with every
+other label starting with exactly one `<arm>_` prefix, for example
+`left_j0 .. left_j5, left_gripper, right_j0 .. right_j5, right_gripper`. Arms
+keep the order of their gripper labels. Every gripper uses the same polarity
+and `gripper_speed_frac`.
+
+The helpers then name the arm: `solve_ik(position, quaternion_wxyz, arm)`,
+`move_to_joints(joints, arm)`, `open_gripper(arm)` and `close_gripper(arm)`
+each move one arm or gripper while everything else holds, and
+`move_arms(left=..., right=...)` queues one synchronized move that starts and
+ends together for every named arm. This profile requires `ik="embodiment"`,
+with `Observation.extra["ik_solver"]` a mapping from arm name to that arm's
+`solver(position, quaternion_wxyz, seed)`; each solver is seeded from its
+arm's queued endpoint. Pyroki solves a single arm, so `bind()` rejects it here.
+
 Pyroki solves in its URDF base frame. This plugin treats world and robot base
 as the same frame. Match the server's robot model, the embodiment's action
 dimensions, and the task's coordinates.

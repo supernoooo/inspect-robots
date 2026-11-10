@@ -9,7 +9,8 @@ are not silently rewritten by the CLI's default delta backstop.
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -23,8 +24,22 @@ _DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
 
 
+@dataclass(frozen=True)
+class ArmLayout:
+    """Where one named arm's joints and gripper sit in a multi-arm action vector."""
+
+    name: str
+    joint_indices: tuple[int, ...]
+    gripper_index: int
+
+
 class MotionQueue:
-    """Queue interpolated full-config targets around a turn-local state cursor."""
+    """Queue interpolated full-config targets around a turn-local state cursor.
+
+    A single-arm queue takes ``gripper_index``; every other dimension is an
+    arm joint and the helpers take no ``arm`` argument. A multi-arm queue
+    takes ``arms`` instead, and every arm and gripper helper names its arm.
+    """
 
     def __init__(
         self,
@@ -32,9 +47,10 @@ class MotionQueue:
         *,
         control_hz: float,
         max_speed_frac: float,
-        gripper_index: int,
+        gripper_index: int | None = None,
         gripper_open_is_high: bool = True,
         gripper_speed_frac: float | None = None,
+        arms: Sequence[ArmLayout] | None = None,
     ) -> None:
         if len(action_space.shape) != 1:
             raise ValueError(f"motion needs a 1-D action box, got {action_space.shape}")
@@ -46,8 +62,8 @@ class MotionQueue:
             not np.isfinite(gripper_speed_frac) or gripper_speed_frac <= 0
         ):
             raise ValueError("gripper_speed_frac must be finite and > 0")
-        if not 0 <= gripper_index < action_space.dim:
-            raise ValueError(f"gripper index {gripper_index} is outside {action_space.dim}-D box")
+        layouts = _layouts(action_space.dim, gripper_index, arms)
+        gripper_indices = [layout.gripper_index for layout in layouts.values()]
         low = action_space.low
         high = action_space.high
         if low is None or high is None:
@@ -89,7 +105,7 @@ class MotionQueue:
         # travel); both speeds stay under the same per-step backstop.
         speeds = np.full(action_space.dim, max_speed_frac, dtype=np.float64)
         if gripper_speed_frac is not None:
-            speeds[gripper_index] = gripper_speed_frac
+            speeds[gripper_indices] = gripper_speed_frac
         step_fracs = np.minimum(speeds / control_hz, _BACKSTOP_STEP_FRAC)
         step_limits = np.minimum(step_fracs * float64_range, native_backstop)
         declared_scales = np.minimum(speeds / _DEFAULT_SPEED_FRAC, 1.0)
@@ -99,22 +115,41 @@ class MotionQueue:
 
         self.control_hz = control_hz
         self._dim = action_space.dim
-        self._gripper_index = gripper_index
-        self._arm_indices = tuple(index for index in range(self._dim) if index != gripper_index)
+        self._layouts = layouts
         self._low = low64
         self._high = high64
         self._step_limits = step_limits
-        high_value = float(high64[gripper_index])
-        low_value = float(low64[gripper_index])
-        self.gripper_open_value = high_value if gripper_open_is_high else low_value
-        self.gripper_closed_value = low_value if gripper_open_is_high else high_value
+        self._gripper_values: dict[int, tuple[float, float]] = {}
+        for index in gripper_indices:
+            high_value = float(high64[index])
+            low_value = float(low64[index])
+            self._gripper_values[index] = (
+                (high_value, low_value) if gripper_open_is_high else (low_value, high_value)
+            )
+        # Single-arm compatibility: the open/closed values of the first gripper.
+        self.gripper_open_value, self.gripper_closed_value = self._gripper_values[
+            gripper_indices[0]
+        ]
         self._cursor: npt.NDArray[np.float64] | None = None
         self._actions: list[Action] = []
 
     @property
+    def arms(self) -> tuple[str, ...]:
+        """Return the arm names of a multi-arm queue, or ``()`` for a single arm."""
+        return tuple(name for name in self._layouts if name is not None)
+
+    def joint_count(self, arm: str | None = None) -> int:
+        """Return the joint count ``move_to_joints`` expects for ``arm``."""
+        return len(self._layout(arm).joint_indices)
+
+    def arm_joints(self, arm: str | None = None) -> npt.NDArray[np.float64]:
+        """Return the queued endpoint's joints of ``arm``; raises before a turn is seeded."""
+        return self._require_cursor()[list(self._layout(arm).joint_indices)].copy()
+
+    @property
     def arm_dof(self) -> int:
-        """Return the joint count expected by ``move_to_joints`` and Pyroki."""
-        return len(self._arm_indices)
+        """Return the joint count expected by ``move_to_joints`` and Pyroki (single arm)."""
+        return self.joint_count()
 
     @property
     def cursor(self) -> npt.NDArray[np.float64] | None:
@@ -123,8 +158,8 @@ class MotionQueue:
 
     @property
     def arm_cursor(self) -> npt.NDArray[np.float64]:
-        """Return the queued endpoint's arm joints; raises before a turn is seeded."""
-        return self._require_cursor()[list(self._arm_indices)].copy()
+        """Return the queued endpoint's arm joints (single arm); raises before a seed."""
+        return self.arm_joints()
 
     def reset(self) -> None:
         """Clear queued actions and the observation-derived cursor."""
@@ -143,27 +178,32 @@ class MotionQueue:
         self._cursor = cursor.copy()
         self._actions.clear()
 
-    def move_to_joints(self, joints: npt.NDArray[Any]) -> None:
-        """Queue an arm target while preserving the cursor's gripper value."""
-        cursor = self._require_cursor()
-        arm = np.asarray(joints, dtype=np.float64).reshape(-1)
-        if arm.shape != (self.arm_dof,):
-            raise ValueError(
-                f"move_to_joints expects {self.arm_dof} arm joints, got shape {arm.shape}"
-            )
-        if not bool(np.all(np.isfinite(arm))):
-            raise ValueError("move_to_joints received a non-finite joint target")
-        target = cursor.copy()
-        target[list(self._arm_indices)] = arm
+    def move_to_joints(self, joints: npt.NDArray[Any], arm: str | None = None) -> None:
+        """Queue an arm target while preserving every gripper and any other arm."""
+        target = self._require_cursor().copy()
+        self._place_joints(target, joints, arm, "move_to_joints")
         self._queue_target(target)
 
-    def open_gripper(self) -> None:
-        """Queue a speed-limited ramp to the configured open box bound."""
-        self._queue_gripper(self.gripper_open_value)
+    def move_arms(self, targets: Mapping[str, npt.NDArray[Any]]) -> None:
+        """Queue one synchronized target for several named arms; unnamed arms hold."""
+        if not self.arms:
+            raise ValueError("move_arms needs a multi-arm embodiment; use move_to_joints(joints)")
+        if not targets:
+            raise ValueError(f"move_arms needs at least one arm target, e.g. {self.arms[0]}=...")
+        target = self._require_cursor().copy()
+        for arm, joints in targets.items():
+            self._place_joints(target, joints, arm, "move_arms")
+        self._queue_target(target)
 
-    def close_gripper(self) -> None:
+    def open_gripper(self, arm: str | None = None) -> None:
+        """Queue a speed-limited ramp to the configured open box bound."""
+        index = self._layout(arm).gripper_index
+        self._queue_gripper(index, self._gripper_values[index][0])
+
+    def close_gripper(self, arm: str | None = None) -> None:
         """Queue a speed-limited ramp to the configured closed box bound."""
-        self._queue_gripper(self.gripper_closed_value)
+        index = self._layout(arm).gripper_index
+        self._queue_gripper(index, self._gripper_values[index][1])
 
     def has_actions(self) -> bool:
         """Report whether model code queued any targets in the current turn."""
@@ -214,9 +254,40 @@ class MotionQueue:
             raise RuntimeError("motion cursor is unset; provide an observation before moving")
         return self._cursor
 
-    def _queue_gripper(self, value: float) -> None:
+    def _layout(self, arm: str | None) -> ArmLayout:
+        if not self.arms:
+            if arm is not None:
+                raise ValueError(
+                    f"this embodiment has a single arm; call without arm (got arm={arm!r})"
+                )
+            return self._layouts[None]
+        if arm is None:
+            raise ValueError(f"name the arm: arm must be one of {list(self.arms)}")
+        layout = self._layouts.get(arm)
+        if layout is None:
+            raise ValueError(f"unknown arm {arm!r}; arm must be one of {list(self.arms)}")
+        return layout
+
+    def _place_joints(
+        self,
+        target: npt.NDArray[np.float64],
+        joints: npt.NDArray[Any],
+        arm: str | None,
+        helper: str,
+    ) -> None:
+        layout = self._layout(arm)
+        values = np.asarray(joints, dtype=np.float64).reshape(-1)
+        count = len(layout.joint_indices)
+        if values.shape != (count,):
+            owner = "arm" if arm is None else f"{arm!r} arm"
+            raise ValueError(f"{helper} expects {count} {owner} joints, got shape {values.shape}")
+        if not bool(np.all(np.isfinite(values))):
+            raise ValueError(f"{helper} received a non-finite joint target")
+        target[list(layout.joint_indices)] = values
+
+    def _queue_gripper(self, index: int, value: float) -> None:
         target = self._require_cursor().copy()
-        target[self._gripper_index] = value
+        target[index] = value
         self._queue_target(target)
 
     def _queue_target(self, target: npt.NDArray[np.float64]) -> None:
@@ -240,3 +311,35 @@ class MotionQueue:
             self._actions.append(Action(data=current + delta * fraction))
         self._actions[-1] = Action(data=target.copy())
         self._cursor = target.copy()
+
+
+def _layouts(
+    dim: int,
+    gripper_index: int | None,
+    arms: Sequence[ArmLayout] | None,
+) -> dict[str | None, ArmLayout]:
+    """Validate a single-arm gripper index or a complete, disjoint multi-arm layout."""
+    if (gripper_index is None) == (arms is None):
+        raise ValueError("give either gripper_index (single arm) or arms (multi-arm), not both")
+    if gripper_index is not None:
+        if not 0 <= gripper_index < dim:
+            raise ValueError(f"gripper index {gripper_index} is outside {dim}-D box")
+        joints = tuple(index for index in range(dim) if index != gripper_index)
+        return {None: ArmLayout(name="", joint_indices=joints, gripper_index=gripper_index)}
+    assert arms is not None
+    if not arms:
+        raise ValueError("arms must name at least one arm")
+    layouts: dict[str | None, ArmLayout] = {}
+    claimed: list[int] = []
+    for layout in arms:
+        if not isinstance(layout.name, str) or not layout.name:
+            raise ValueError("every arm needs a non-empty name")
+        if layout.name in layouts:
+            raise ValueError(f"arm {layout.name!r} is declared twice")
+        if not layout.joint_indices:
+            raise ValueError(f"arm {layout.name!r} has no joints")
+        layouts[layout.name] = layout
+        claimed.extend((*layout.joint_indices, layout.gripper_index))
+    if sorted(claimed) != list(range(dim)):
+        raise ValueError(f"arm layouts must cover each of the {dim} action dimensions exactly once")
+    return layouts

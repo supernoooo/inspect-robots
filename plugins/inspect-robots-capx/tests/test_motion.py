@@ -10,7 +10,7 @@ import pytest
 from inspect_robots.approver import DeltaLimitApprover
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.types import Action
-from inspect_robots_capx._motion import MotionQueue
+from inspect_robots_capx._motion import ArmLayout, MotionQueue
 
 
 def _space() -> Box:
@@ -295,3 +295,144 @@ def test_gripper_speed_frac_scales_declared_max_step_and_rejects_bad_values() ->
         MotionQueue(
             space, control_hz=10.0, max_speed_frac=0.05, gripper_index=1, gripper_speed_frac=0.0
         )
+
+
+_TWO_ARMS = (
+    ArmLayout(name="left", joint_indices=(0, 1), gripper_index=2),
+    ArmLayout(name="right", joint_indices=(3, 4), gripper_index=5),
+)
+
+
+def _two_arm_motion(*, gripper_speed_frac: float | None = None) -> MotionQueue:
+    space = Box(
+        shape=(6,),
+        low=np.array([-1.0, -1.0, 0.0, -1.0, -1.0, 0.0]),
+        high=np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            gripper="continuous",
+            dim_labels=(
+                "left_j0",
+                "left_j1",
+                "left_gripper",
+                "right_j0",
+                "right_j1",
+                "right_gripper",
+            ),
+            max_step=(0.02, 0.02, 0.1, 0.02, 0.02, 0.1),
+        ),
+    )
+    return MotionQueue(
+        space,
+        control_hz=10.0,
+        max_speed_frac=0.1,
+        arms=_TWO_ARMS,
+        gripper_speed_frac=gripper_speed_frac,
+    )
+
+
+def test_multi_arm_moves_one_arm_and_holds_the_other_and_both_grippers() -> None:
+    motion = _two_arm_motion()
+    start = np.array([0.0, 0.0, 1.0, 0.5, -0.5, 0.4])
+    motion.begin_turn(start)
+
+    motion.move_to_joints(np.array([0.1, -0.1]), arm="left")
+    chunk = motion.take_chunk()
+
+    data = np.stack([action.data for action in chunk.actions])
+    assert len(chunk.actions) == 6
+    assert np.array_equal(data[-1], [0.1, -0.1, 1.0, 0.5, -0.5, 0.4])
+    assert np.all(data[:, 2:] == start[2:])
+    assert motion.arms == ("left", "right")
+    assert motion.joint_count("right") == 2
+
+
+def test_move_arms_is_one_synchronized_segment_and_unnamed_arms_hold() -> None:
+    motion = _two_arm_motion()
+    motion.begin_turn(np.zeros(6))
+
+    motion.move_arms({"left": np.array([0.1, 0.0]), "right": np.array([0.0, -0.2])})
+    chunk = motion.take_chunk()
+
+    data = np.stack([action.data for action in chunk.actions])
+    # The slower right arm (0.2 rad at 0.02/step) paces both arms: they finish together.
+    assert len(chunk.actions) == 11
+    assert np.array_equal(data[-1], [0.1, 0.0, 0.0, 0.0, -0.2, 0.0])
+    assert np.all(np.diff(data[:, 0]) > 0) and np.all(np.diff(data[:, 4]) < 0)
+    motion.begin_turn(np.zeros(6))
+    motion.move_arms({"right": np.array([0.04, 0.0])})
+    assert np.all(np.stack([a.data for a in motion.take_chunk().actions])[:, :3] == 0)
+
+
+def test_multi_arm_grippers_and_ik_seeds_are_per_arm() -> None:
+    motion = _two_arm_motion()
+    motion.begin_turn(np.array([0.1, 0.2, 1.0, 0.3, 0.4, 1.0]))
+
+    motion.close_gripper(arm="right")
+    motion.move_to_joints(np.array([0.32, 0.4]), arm="right")
+
+    assert motion.cursor is not None
+    assert motion.cursor.tolist() == pytest.approx([0.1, 0.2, 1.0, 0.32, 0.4, 0.0])
+    assert motion.arm_joints("left").tolist() == pytest.approx([0.1, 0.2])
+    assert motion.arm_joints("right").tolist() == pytest.approx([0.32, 0.4])
+    motion.open_gripper(arm="right")
+    assert motion.cursor[5] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (lambda m: m.move_to_joints(np.zeros(2)), "name the arm"),
+        (lambda m: m.move_to_joints(np.zeros(2), arm="middle"), "unknown arm 'middle'"),
+        (lambda m: m.move_to_joints(np.zeros(3), arm="left"), "expects 2 'left' arm joints"),
+        (lambda m: m.open_gripper(), "name the arm"),
+        (lambda m: m.move_arms({}), "at least one arm target"),
+        (lambda m: m.move_arms({"left": np.array([np.nan, 0.0])}), "non-finite"),
+        (lambda m: m.arm_dof, "name the arm"),
+    ],
+    ids=["no_arm", "unknown_arm", "wrong_size", "gripper_no_arm", "empty", "nan", "arm_dof"],
+)
+def test_multi_arm_helpers_require_a_known_arm(call: object, message: str) -> None:
+    motion = _two_arm_motion()
+    motion.begin_turn(np.zeros(6))
+
+    with pytest.raises(ValueError, match=message):
+        call(motion)  # type: ignore[operator]
+    assert not motion.has_actions()
+
+
+def test_single_arm_helpers_reject_an_arm_name_and_move_arms() -> None:
+    motion = _motion()
+    motion.begin_turn(np.array([0.0, 0.0, 1.0]))
+
+    with pytest.raises(ValueError, match="single arm"):
+        motion.move_to_joints(np.zeros(2), arm="left")
+    with pytest.raises(ValueError, match="multi-arm embodiment"):
+        motion.move_arms({"left": np.zeros(2)})
+    assert motion.arms == ()
+
+
+def test_multi_arm_gripper_speed_frac_applies_to_every_gripper() -> None:
+    motion = _two_arm_motion(gripper_speed_frac=0.05)
+
+    assert motion._step_limits.tolist() == pytest.approx([0.02, 0.02, 0.05, 0.02, 0.02, 0.05])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"gripper_index": 2, "arms": _TWO_ARMS}, "either gripper_index"),
+        ({}, "either gripper_index"),
+        ({"arms": (_TWO_ARMS[0],)}, "exactly once"),
+        ({"arms": (_TWO_ARMS[0], _TWO_ARMS[0])}, "declared twice"),
+        ({"arms": (_TWO_ARMS[0], ArmLayout("right", (), 5))}, "no joints"),
+    ],
+    ids=["both", "neither", "uncovered", "duplicate", "jointless"],
+)
+def test_arm_layouts_are_validated(kwargs: dict[str, object], message: str) -> None:
+    space = Box(
+        shape=(6,), low=-np.ones(6), high=np.ones(6), semantics=ActionSemantics("joint_pos")
+    )
+
+    with pytest.raises(ValueError, match=message):
+        MotionQueue(space, control_hz=10.0, max_speed_frac=0.1, **kwargs)  # type: ignore[arg-type]
